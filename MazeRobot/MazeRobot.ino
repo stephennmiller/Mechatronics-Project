@@ -388,9 +388,9 @@ void motorInit(const Motor* m) {
 void motorSet(const Motor* m, int speed) {
   int adjustedSpeed;
   if (speed > 0) {
-    adjustedSpeed = constrain(speed + m->trim, -255, 255);
+    adjustedSpeed = constrain(speed + m->trim, 1, 255);
   } else if (speed < 0) {
-    adjustedSpeed = constrain(speed - m->trim, -255, 255);
+    adjustedSpeed = constrain(speed - m->trim, -255, -1);
   } else {
     adjustedSpeed = 0;
   }
@@ -580,7 +580,7 @@ RobotState returnState;     // State to resume after turn completes
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
-float dist[3];              // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
+float dist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
 float distFiltered[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
 
 // --- Wall Following State ---
@@ -697,7 +697,7 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState) {
 //   4. Set IR_LINE_THRESHOLD halfway between those two values
 //   5. Set IR_HIGH_ON_LINE based on which reading was higher
 void readIRSensors() {
-  const int irPins[] = { PIN_IR1, PIN_IR2, PIN_IR3, PIN_IR4 };
+  static const int irPins[] = { PIN_IR1, PIN_IR2, PIN_IR3, PIN_IR4 };
   for (int i = 0; i < 4; i++) {
     irRaw[i] = analogRead(irPins[i]);
     if (IR_HIGH_ON_LINE) {
@@ -723,7 +723,7 @@ void readUltrasonicSensors() {
   // Read one sensor per call to reduce blocking time (~30ms vs ~90ms)
   // and prevent echo crosstalk between adjacent sensors.
   static uint8_t sensorIndex = 0;
-  NewPing* sonars[] = { &sonarFront, &sonarLeft, &sonarRight };
+  static NewPing* const sonars[] = { &sonarFront, &sonarLeft, &sonarRight };
 
   float raw = sonars[sensorIndex]->ping_cm();
   dist[sensorIndex] = (raw == 0) ? MAX_DISTANCE : raw;
@@ -827,8 +827,11 @@ void followLine() {
   #ifdef DEBUG
     static unsigned long lastLinePrint = 0;
     if (millis() - lastLinePrint > 200) {
-      DEBUG_PRINTF("LINE pos=%.1f err=%.1f out=%.0f L=%d R=%d\n",
-                   pos, error, output, leftSpeed, rightSpeed);
+      Serial.print("LINE pos="); Serial.print(pos, 1);
+      Serial.print(" err=");     Serial.print(error, 1);
+      Serial.print(" out=");     Serial.print(output, 0);
+      Serial.print(" L=");      Serial.print(leftSpeed);
+      Serial.print(" R=");      Serial.println(rightSpeed);
       lastLinePrint = millis();
     }
   #endif
@@ -890,7 +893,7 @@ void followWall() {
   // --- Step 2: Front obstacle avoidance ---
   // If a wall is directly ahead and too close, back up first
   // (to create clearance) then turn away from the followed wall.
-  if (dist[0] < FRONT_OBSTACLE_DIST) {
+  if (distFiltered[0] < FRONT_OBSTACLE_DIST) {
     // Turn away from the wall we're following:
     //   Following right wall -> turn left (away from right)
     //   Following left wall  -> turn right (away from left)
@@ -967,9 +970,12 @@ void followWall() {
   #ifdef DEBUG
     static unsigned long lastWallPrint = 0;
     if (millis() - lastWallPrint > 200) {
-      DEBUG_PRINTF("WALL %s d=%.0f err=%.1f out=%.0f L=%d R=%d\n",
-                   followRightWall ? "R" : "L",
-                   wallDist, error, output, leftSpeed, rightSpeed);
+      Serial.print("WALL ");    Serial.print(followRightWall ? "R" : "L");
+      Serial.print(" d=");      Serial.print(wallDist, 0);
+      Serial.print(" err=");    Serial.print(error, 1);
+      Serial.print(" out=");    Serial.print(output, 0);
+      Serial.print(" L=");      Serial.print(leftSpeed);
+      Serial.print(" R=");      Serial.println(rightSpeed);
       lastWallPrint = millis();
     }
   #endif
