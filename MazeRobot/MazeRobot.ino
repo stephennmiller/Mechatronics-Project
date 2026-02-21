@@ -27,15 +27,15 @@
 //
 //  STATE MACHINE DIAGRAM:
 //    LINE_FOLLOWING ──> MODE_SWITCH ──> WALL_FOLLOWING
-//                                          │
-//                                    ┌─────┼─────┐
-//                                    v     v     v
-//                              BACKING_UP  │  EXIT_FOUND
-//                                    │     │
-//                                    v     │
-//                                TURNING ──┘
+//          │                               │
+//          │ (stuck)                  ┌─────┼─────┐
+//          └──────> BACKING_UP <─────┘     v     v
+//                        │          (stuck) │  EXIT_FOUND
+//                        v                  │
+//                    TURNING ───────────────┘
 //
-//    Any state can transition to ERROR_STATE on low battery.
+//    Any state can transition to ERROR_STATE on low battery
+//    or repeated stuck detection.
 //
 //  DEPENDENCIES:
 //  - NewPing library (install via Arduino IDE Library Manager)
@@ -63,6 +63,7 @@ bool timerExpired(Timer* t);
 bool timerRunning(Timer* t);
 void startTurn(TurnDir dir, RobotState afterState, unsigned long duration);
 void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDuration);
+bool checkStuck();
 
 // =====================================================
 // SECTION 1: DEBUG TOGGLE
@@ -224,6 +225,18 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
 
 // -- Ultrasonic Filtering --
 #define US_ALPHA            0.3   // EMA smoothing factor (0-1, higher = less smoothing)
+
+// -- Stuck Detection / Watchdog --
+// Monitors ultrasonic readings during active navigation. If no sensor
+// changes by more than STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS, the
+// robot is assumed stuck and a recovery maneuver is attempted.
+#define STUCK_TIMEOUT_MS       3000   // No progress for this long = stuck
+#define STUCK_DIST_THRESHOLD    2.0   // cm change in any sensor = "moving"
+                                      // (well above ~0.5cm EMA noise floor)
+#define STUCK_MAX_RETRIES         2   // Recovery attempts before error state
+#define STUCK_COOLDOWN_MS      5000   // Repeated stuck within this window
+                                      // increments retry counter; outside
+                                      // this window resets counter to 1
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -1098,7 +1111,7 @@ void victoryBlink() {
 }
 
 // =====================================================
-// SECTION 12: ERROR / BATTERY HANDLING
+// SECTION 12: ERROR / BATTERY / STUCK HANDLING
 //
 // Safety systems to protect the robot and its environment.
 //
@@ -1116,6 +1129,13 @@ void victoryBlink() {
 //   LED turns on and the error message is printed via serial.
 //   Future improvement: add a timed recovery check (e.g., re-read
 //   battery after 5 seconds and resume if voltage has recovered).
+//
+// STUCK DETECTION:
+//   Monitors ultrasonic sensor readings during active navigation.
+//   If no sensor changes by > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS,
+//   the robot is assumed stuck. Recovery uses startBackupAndTurn()
+//   with alternating turn directions. After STUCK_MAX_RETRIES
+//   within STUCK_COOLDOWN_MS, escalates to ERROR_STATE.
 // =====================================================
 
 // enterErrorState: Safely stop the robot and indicate an error.
@@ -1171,6 +1191,88 @@ bool checkBattery() {
   return true;
 }
 
+// checkStuck: Detect if the robot is stuck and attempt recovery.
+//
+// Called every loop() iteration after sensor reads. Returns false
+// if stuck recovery has escalated to error state. Returns true
+// otherwise (including during active recovery maneuvers).
+//
+// Only monitors during LINE_FOLLOWING and WALL_FOLLOWING. Stores a
+// snapshot of distFiltered[] and checks if ANY sensor has changed
+// by > STUCK_DIST_THRESHOLD. If none have changed for
+// STUCK_TIMEOUT_MS, triggers recovery via startBackupAndTurn().
+// After STUCK_MAX_RETRIES within STUCK_COOLDOWN_MS, enters error state.
+bool checkStuck() {
+  static float snapDist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE };
+  static unsigned long snapTime = 0;
+  static unsigned long lastRecoveryTime = 0;
+  static uint8_t stuckRetryCount = 0;
+  static bool wasChecking = false;
+
+  bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
+                      currentState == STATE_WALL_FOLLOWING);
+
+  if (!shouldCheck) {
+    wasChecking = false;
+    return true;
+  }
+
+  unsigned long now = millis();
+
+  // Just transitioned into a checked state (e.g. after a turn) —
+  // refresh snapshot so maneuver duration doesn't count toward timeout.
+  if (!wasChecking) {
+    for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+    snapTime = now;
+    wasChecking = true;
+    return true;
+  }
+
+  // Check if any sensor has changed meaningfully
+  bool hasMoved = false;
+  for (uint8_t i = 0; i < 3; i++) {
+    float diff = distFiltered[i] - snapDist[i];
+    if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
+      hasMoved = true;
+      break;
+    }
+  }
+
+  if (hasMoved) {
+    for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+    snapTime = now;
+    return true;
+  }
+
+  // No change — check if timeout has elapsed
+  if (now - snapTime < STUCK_TIMEOUT_MS) return true;
+
+  // === STUCK DETECTED ===
+  if (lastRecoveryTime > 0 && (now - lastRecoveryTime < STUCK_COOLDOWN_MS)) {
+    stuckRetryCount++;
+  } else {
+    stuckRetryCount = 1;
+  }
+
+  DEBUG_PRINTF("STUCK #%d  F=%.0f L=%.0f R=%.0f\n",
+               stuckRetryCount,
+               distFiltered[0], distFiltered[1], distFiltered[2]);
+
+  if (stuckRetryCount > STUCK_MAX_RETRIES) {
+    enterErrorState("Stuck: max retries exceeded");
+    return false;
+  }
+
+  // Recovery: brake, then backup-and-turn in alternating direction
+  driveBrake();
+  TurnDir escapeDir = (stuckRetryCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
+  startBackupAndTurn(escapeDir, currentState);
+
+  lastRecoveryTime = now;
+  wasChecking = false;
+  return true;
+}
+
 // =====================================================
 // SECTION 13: SETUP & MAIN LOOP
 //
@@ -1187,8 +1289,9 @@ bool checkBattery() {
 // EXECUTION FLOW PER LOOP ITERATION:
 //   1. Check battery -> enter error state if low
 //   2. Read all sensors (IR + ultrasonic)
-//   3. Execute current state's logic
-//   4. State logic may change currentState for next iteration
+//   3. Check stuck -> attempt recovery or enter error state
+//   4. Execute current state's logic
+//   5. State logic may change currentState for next iteration
 // =====================================================
 
 void setup() {
@@ -1245,6 +1348,11 @@ void loop() {
   // can detect emergencies (e.g., unexpected obstacle) mid-maneuver.
   readIRSensors();
   readUltrasonicSensors();
+
+  // --- Safety: detect stuck condition ---
+  // If max retries exceeded, checkStuck() enters ERROR_STATE and
+  // returns false. During active recovery, it returns true.
+  if (!checkStuck()) return;
 
   // --- State machine dispatch ---
   // Each case handles one state's behavior. States transition by
