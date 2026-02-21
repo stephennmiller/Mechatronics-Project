@@ -20,12 +20,81 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 
 ## Hardware
 
-- Arduino Mega 2560
-- 4 DC motors (via 2 L298N drivers, individual control)
-- 4 IR sensors (line detection, evenly spaced in a row)
-- 3 Ultrasonic sensors (front, left, right wall detection)
-- 8V battery pack with voltage divider on A4
-- 6 LEDs (power, error, line mode, wall mode, right wall, left wall)
+### Bill of Materials
+
+| Qty | Component | Purpose | Notes |
+|-----|-----------|---------|-------|
+| 1 | Arduino Mega 2560 | Main controller | Provides 54 digital I/O pins, 16 analog inputs, 15 PWM outputs |
+| 4 | DC gear motors | Drive wheels | One per wheel; skid-steer (tank drive) configuration |
+| 4 | Wheels | Locomotion | Sized to match motor shafts |
+| 2 | L298N dual H-bridge motor drivers | Motor control | Each drives 2 motors (left pair + right pair); supports PWM speed and direction |
+| 4 | IR reflectance sensors (analog) | Line detection | Mounted in a row across the front; detect black tape on light surface |
+| 3 | HC-SR04 ultrasonic sensors | Wall detection | Front, left, and right facing; 2-200 cm range |
+| 6 | LEDs (any color) | Status indicators | Power, error, line mode, wall mode, right wall, left wall |
+| 6 | 220-330 ohm resistors | LED current limiting | One per LED |
+| 1 | 8V battery pack (e.g., 6xAA or 2S LiPo) | Power supply | Must supply enough current for 4 motors + logic |
+| 2 | Resistors for voltage divider | Battery monitoring | Scale 8V down to 0-5V for analog pin A4; e.g., 30k + 10k |
+| 1 | Robot chassis / frame | Structure | Must fit 4 motors, sensors, and the Mega |
+| - | Jumper wires, breadboard, standoffs | Wiring | As needed for connections |
+
+### Wiring Summary
+
+**Motor Drivers (L298N):**
+
+| L298N | Channel | Motor | PWM Pin | Direction Pins |
+|-------|---------|-------|---------|----------------|
+| #1 | A | Left Front | 2 | 22, 23 |
+| #1 | B | Left Rear | 3 | 24, 25 |
+| #2 | A | Right Front | 4 | 26, 27 |
+| #2 | B | Right Rear | 5 | 28, 29 |
+
+- Connect each L298N's `VCC` to the battery pack positive terminal
+- Connect each L298N's `GND` to common ground (shared with Arduino GND)
+- Connect each L298N's `5V` output to nothing (or use one to power the Arduino via the 5V pin if not using USB)
+- The ENA/ENB jumpers must be **removed** — the PWM pins replace them
+
+**IR Sensors:**
+
+| Sensor | Position | Pin |
+|--------|----------|-----|
+| IR1 | Leftmost | A0 |
+| IR2 | Center-left | A1 |
+| IR3 | Center-right | A2 |
+| IR4 | Rightmost | A3 |
+
+- Mount in a straight line across the front of the chassis, evenly spaced to span the tape width
+- Power from Arduino 5V; signal wire to the analog pin
+
+**Ultrasonic Sensors (HC-SR04):**
+
+| Sensor | Direction | Trig Pin | Echo Pin |
+|--------|-----------|----------|----------|
+| Front | Forward | 30 | 31 |
+| Left | Left side | 32 | 33 |
+| Right | Right side | 34 | 35 |
+
+- Power from Arduino 5V; GND to common ground
+- Mount at consistent height (~5-10 cm from ground) for reliable wall detection
+
+**LEDs:**
+
+| LED | Function | Pin |
+|-----|----------|-----|
+| Power | Robot is running | 36 |
+| Error | Fault detected (e.g., low battery) | 37 |
+| Line | Line-following mode active | 38 |
+| Wall | Wall-following mode active | 39 |
+| Right | Following right wall | 40 |
+| Left | Following left wall | 41 |
+
+- Each LED needs a 220-330 ohm resistor in series to GND
+
+**Battery Monitor:**
+
+- Voltage divider from battery positive to pin A4
+- Formula: `R2 / (R1 + R2)` must scale the max battery voltage to under 5V
+- Example: R1 = 30k, R2 = 10k → 8V * 10/(30+10) = 2V at pin (safe)
+- Update `VOLTAGE_SCALE` in Section 3 of `MazeRobot.ino` to match your resistors
 
 ## Dependencies
 
