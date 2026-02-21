@@ -383,20 +383,26 @@ void motorInit(const Motor* m) {
 //   Negative speed (-255 to -1) = backward
 //   Zero                        = coast (free-spin stop)
 //
-// The trim offset is added before clamping, so a motor with trim=+10
-// receiving speed=150 will actually run at 160.
+// The trim offset is applied only to non-zero speeds (and preserves the
+// original sign), so speed=0 always coasts regardless of trim.
 void motorSet(const Motor* m, int speed) {
-  speed += m->trim;
-  speed = constrain(speed, -255, 255);
-
+  int adjustedSpeed;
   if (speed > 0) {
+    adjustedSpeed = constrain(speed + m->trim, -255, 255);
+  } else if (speed < 0) {
+    adjustedSpeed = constrain(speed - m->trim, -255, 255);
+  } else {
+    adjustedSpeed = 0;
+  }
+
+  if (adjustedSpeed > 0) {
     digitalWrite(m->in1Pin, HIGH);
     digitalWrite(m->in2Pin, LOW);
-    analogWrite(m->enablePin, speed);
-  } else if (speed < 0) {
+    analogWrite(m->enablePin, adjustedSpeed);
+  } else if (adjustedSpeed < 0) {
     digitalWrite(m->in1Pin, LOW);
     digitalWrite(m->in2Pin, HIGH);
-    analogWrite(m->enablePin, -speed);  // analogWrite takes positive value
+    analogWrite(m->enablePin, -adjustedSpeed);  // analogWrite takes positive value
   } else {
     // Coast: both direction pins LOW, no PWM
     digitalWrite(m->in1Pin, LOW);
