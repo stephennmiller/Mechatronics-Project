@@ -78,14 +78,14 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 
 **LEDs:**
 
-| LED | Function | Pin |
-|-----|----------|-----|
-| Power | Robot is running | 36 |
-| Error | Fault detected (e.g., low battery) | 37 |
-| Line | Line-following mode active | 38 |
-| Wall | Wall-following mode active | 39 |
-| Right | Following right wall | 40 |
-| Left | Following left wall | 41 |
+| LED | Function | Pin | Color |
+|-----|----------|-----|-------|
+| Power | Robot is running | 36 | Green |
+| Error | Fault detected (e.g., low battery) | 37 | Red |
+| Line | Line-following mode active | 38 | Blue |
+| Wall | Wall-following mode active | 39 | Yellow |
+| Right | Following right wall | 40 | White |
+| Left | Following left wall | 41 | White |
 
 - Each LED needs a 220-330 ohm resistor in series to GND
 
