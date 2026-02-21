@@ -743,8 +743,7 @@ float linePosition() {
   for (int i = 0; i < 4; i++) {
     // Weight = raw intensity for on-line sensors, 0 for off-line sensors.
     // If IR_HIGH_ON_LINE=0, we invert the raw value so higher = more line.
-    float weight = irOnLine[i] ? (float)irRaw[i] : 0.0;
-    if (!IR_HIGH_ON_LINE) weight = irOnLine[i] ? (float)(1023 - irRaw[i]) : 0.0;
+    float weight = irOnLine[i] ? (float)(IR_HIGH_ON_LINE ? irRaw[i] : 1023 - irRaw[i]) : 0.0;
     weightedSum += weight * i;   // Multiply by sensor index (0,1,2,3)
     totalWeight += weight;
   }
