@@ -180,7 +180,7 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
 // Calibrate by running a 90-degree turn and adjusting until accurate.
 #define TURN_90_DURATION    300   // ms to spin for ~90 degrees at TURN_SPEED
 #define BACKUP_DURATION     200   // ms to reverse before turning
-#define TURN_180_DURATION   600   // ms to spin for ~180 degrees (2x TURN_90_DURATION)
+#define TURN_180_DURATION   (2 * TURN_90_DURATION)  // Derived from 90° duration
 #define MODE_SWITCH_PAUSE   500   // ms pause when switching line->wall
 
 // -- IR Sensor Calibration --
@@ -631,13 +631,16 @@ void driveBrake() {
 //
 // The robot spins in place by running left and right sides in
 // opposite directions at TURN_SPEED. A timer is started for
-// TURN_90_DURATION ms. The main loop checks timerExpired() each
-// iteration and transitions to afterState when the turn completes.
+// the given duration (defaults to TURN_90_DURATION). Callers can
+// pass a different duration for non-90° turns (e.g. 180° U-turns).
+// The main loop checks timerExpired() each iteration and
+// transitions to afterState when the turn completes.
 //
 // Parameters:
 //   dir        - TURN_LEFT or TURN_RIGHT
 //   afterState - state to transition to when the turn finishes
 //                (usually STATE_WALL_FOLLOWING)
+//   duration   - turn time in ms (default: TURN_90_DURATION)
 void startTurn(TurnDir dir, RobotState afterState, unsigned long duration = TURN_90_DURATION) {
   pendingTurn = dir;
   returnState = afterState;
