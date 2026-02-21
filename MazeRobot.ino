@@ -687,7 +687,7 @@ void readIRSensors() {
     if (IR_HIGH_ON_LINE) {
       irOnLine[i] = (irRaw[i] >= IR_LINE_THRESHOLD);
     } else {
-      irOnLine[i] = (irRaw[i] <= (1023 - IR_LINE_THRESHOLD));
+      irOnLine[i] = (irRaw[i] <= IR_LINE_THRESHOLD);
     }
   }
 }
@@ -793,15 +793,15 @@ void followLine() {
   float error = pos - 1.5;
   float output = pidCompute(&pidLine, error);
 
-  // Apply PID output as a differential: subtract from left, add to right.
-  // Positive output (line right) -> left goes slower, right goes faster
-  // -> robot turns right toward the line. This works because:
+  // Apply PID output as a differential: add to left, subtract from right.
+  // In differential/skid-steer drive, the robot turns toward the SLOWER side.
+  // Positive output (line is right of center) -> we need to steer RIGHT:
   //   error > 0 -> Kp * error > 0 -> output > 0
-  //   -> leftSpeed = BASE - output (slower)
-  //   -> rightSpeed = BASE + output (faster)
-  //   -> robot turns right
-  int leftSpeed = constrain(BASE_SPEED - (int)output, 0, 255);
-  int rightSpeed = constrain(BASE_SPEED + (int)output, 0, 255);
+  //   -> leftSpeed = BASE + output (faster)
+  //   -> rightSpeed = BASE - output (slower)
+  //   -> slower right side -> robot turns RIGHT toward the line
+  int leftSpeed = constrain(BASE_SPEED + (int)output, 0, 255);
+  int rightSpeed = constrain(BASE_SPEED - (int)output, 0, 255);
   driveTank(leftSpeed, rightSpeed);
 
   // Throttled debug output (every 200ms to avoid serial flooding)
@@ -927,18 +927,20 @@ void followWall() {
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
 
-  // Apply correction. The sign is mirrored depending on which wall
-  // we're following so that positive PID output always means
-  // "steer toward the followed wall."
+  // Apply correction. In skid-steer, the robot turns toward the SLOWER side.
+  // The sign is mirrored depending on which wall we're following so that
+  // positive PID output always steers toward the followed wall.
   int leftSpeed, rightSpeed;
   if (followRightWall) {
-    // Right wall: positive output -> steer right (toward wall)
-    leftSpeed  = constrain(speed - (int)output, 0, 255);
-    rightSpeed = constrain(speed + (int)output, 0, 255);
-  } else {
-    // Left wall: positive output -> steer left (toward wall)
+    // Right wall: positive error (too far from wall) -> steer RIGHT toward wall
+    // Faster left + slower right -> robot turns right
     leftSpeed  = constrain(speed + (int)output, 0, 255);
     rightSpeed = constrain(speed - (int)output, 0, 255);
+  } else {
+    // Left wall: positive error (too far from wall) -> steer LEFT toward wall
+    // Slower left + faster right -> robot turns left
+    leftSpeed  = constrain(speed - (int)output, 0, 255);
+    rightSpeed = constrain(speed + (int)output, 0, 255);
   }
   driveTank(leftSpeed, rightSpeed);
 
@@ -987,8 +989,8 @@ bool isWallMazeTransition() {
       // High = on line: any sensor above threshold means tape is still visible
       if (irRaw[i] >= IR_NO_LINE_THRESH) { lowLineConfidence = false; break; }
     } else {
-      // Low = on line: any sensor below inverted threshold means tape visible
-      if (irRaw[i] <= (1023 - IR_NO_LINE_THRESH)) { lowLineConfidence = false; break; }
+      // Low = on line: any sensor below threshold means tape is still visible
+      if (irRaw[i] <= IR_NO_LINE_THRESH) { lowLineConfidence = false; break; }
     }
   }
 
