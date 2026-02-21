@@ -61,8 +61,8 @@ void motorBrake(const Motor* m);
 void timerStart(Timer* t, unsigned long durationMs);
 bool timerExpired(Timer* t);
 bool timerRunning(Timer* t);
-void startTurn(TurnDir dir, RobotState afterState);
-void startBackupAndTurn(TurnDir dir, RobotState afterState);
+void startTurn(TurnDir dir, RobotState afterState, unsigned long duration);
+void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDuration);
 
 // =====================================================
 // SECTION 1: DEBUG TOGGLE
@@ -180,6 +180,7 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState);
 // Calibrate by running a 90-degree turn and adjusting until accurate.
 #define TURN_90_DURATION    300   // ms to spin for ~90 degrees at TURN_SPEED
 #define BACKUP_DURATION     200   // ms to reverse before turning
+#define TURN_180_DURATION   (2 * TURN_90_DURATION)  // Derived from 90° duration
 #define MODE_SWITCH_PAUSE   500   // ms pause when switching line->wall
 
 // -- IR Sensor Calibration --
@@ -575,6 +576,7 @@ Timer stateTimer = { 0, 0, false };              // Shared timer for timed state
 // and which state to return to after the maneuver completes.
 TurnDir pendingTurn;        // Direction of the next/current turn
 RobotState returnState;     // State to resume after turn completes
+unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next turn
 
 // --- Sensor Data ---
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
@@ -629,14 +631,17 @@ void driveBrake() {
 //
 // The robot spins in place by running left and right sides in
 // opposite directions at TURN_SPEED. A timer is started for
-// TURN_90_DURATION ms. The main loop checks timerExpired() each
-// iteration and transitions to afterState when the turn completes.
+// the given duration (defaults to TURN_90_DURATION). Callers can
+// pass a different duration for non-90° turns (e.g. 180° U-turns).
+// The main loop checks timerExpired() each iteration and
+// transitions to afterState when the turn completes.
 //
 // Parameters:
 //   dir        - TURN_LEFT or TURN_RIGHT
 //   afterState - state to transition to when the turn finishes
 //                (usually STATE_WALL_FOLLOWING)
-void startTurn(TurnDir dir, RobotState afterState) {
+//   duration   - turn time in ms (default: TURN_90_DURATION)
+void startTurn(TurnDir dir, RobotState afterState, unsigned long duration = TURN_90_DURATION) {
   pendingTurn = dir;
   returnState = afterState;
 
@@ -646,7 +651,7 @@ void startTurn(TurnDir dir, RobotState afterState) {
   } else {
     driveTank(TURN_SPEED, -TURN_SPEED);   // Left side forward, right side back
   }
-  timerStart(&stateTimer, TURN_90_DURATION);
+  timerStart(&stateTimer, duration);
   currentState = STATE_TURNING;
 
   DEBUG_PRINTF("Turn %s\n", dir == TURN_LEFT ? "LEFT" : "RIGHT");
@@ -662,9 +667,10 @@ void startTurn(TurnDir dir, RobotState afterState) {
 // Parameters:
 //   dir        - direction to turn after backing up
 //   afterState - state to resume after the full maneuver
-void startBackupAndTurn(TurnDir dir, RobotState afterState) {
+void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDuration = TURN_90_DURATION) {
   pendingTurn = dir;
   returnState = afterState;
+  pendingTurnDuration = turnDuration;
   driveTank(-BASE_SPEED / 2, -BASE_SPEED / 2);  // Reverse at half speed
   timerStart(&stateTimer, BACKUP_DURATION);
   currentState = STATE_BACKING_UP;
@@ -887,6 +893,20 @@ void followWall() {
     // robot will eventually find the exit (though not necessarily
     // by the shortest path).
     startTurn(TURN_LEFT, STATE_WALL_FOLLOWING);
+    return;
+  }
+
+  // --- Dead-end detection ---
+  // All three sides blocked = dead end. Perform a 180-degree U-turn
+  // instead of the two-cycle 90+90 recovery.
+  bool deadEnd = (distFiltered[0] < FRONT_OBSTACLE_DIST) &&
+                 (distFiltered[1] < WALL_CLOSE_THRESH) &&
+                 (distFiltered[2] < WALL_CLOSE_THRESH);
+
+  if (deadEnd) {
+    DEBUG_PRINTLN("Dead end detected");
+    TurnDir dir = followRightWall ? TURN_LEFT : TURN_RIGHT;
+    startBackupAndTurn(dir, STATE_WALL_FOLLOWING, TURN_180_DURATION);
     return;
   }
 
@@ -1271,7 +1291,7 @@ void loop() {
       // Reversing before a turn. Motors are running backward.
       // When timer expires, initiate the actual spin turn.
       if (timerExpired(&stateTimer)) {
-        startTurn(pendingTurn, returnState);  // -> STATE_TURNING
+        startTurn(pendingTurn, returnState, pendingTurnDuration);  // -> STATE_TURNING
       }
       break;
 
