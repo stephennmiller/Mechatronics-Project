@@ -43,6 +43,27 @@
 
 #include <NewPing.h>
 
+// Forward declarations to prevent Arduino auto-prototype errors.
+// The Arduino preprocessor generates function prototypes at the top
+// of the file, before struct/enum definitions. Explicit prototypes
+// with forward-declared types suppress the broken auto-prototypes.
+struct PIDController;
+struct Motor;
+struct Timer;
+enum RobotState : uint8_t;
+enum TurnDir : uint8_t;
+
+void pidReset(PIDController* pid);
+float pidCompute(PIDController* pid, float error);
+void motorInit(const Motor* m);
+void motorSet(const Motor* m, int speed);
+void motorBrake(const Motor* m);
+void timerStart(Timer* t, unsigned long durationMs);
+bool timerExpired(Timer* t);
+bool timerRunning(Timer* t);
+void startTurn(TurnDir dir, RobotState afterState);
+void startBackupAndTurn(TurnDir dir, RobotState afterState);
+
 // =====================================================
 // SECTION 1: DEBUG TOGGLE
 //
@@ -177,6 +198,7 @@
 #define FRONT_OBSTACLE_DIST  15   // Front wall trigger distance (cm)
 #define EXIT_THRESHOLD      100   // Open space = maze exit (cm)
 #define DEBOUNCE_COUNT        3   // Wall-switch debounce cycles
+#define WALL_TRANSITION_DEBOUNCE 5 // Consecutive readings before line->wall switch
 
 // -- PID Tuning --
 // Start with Kp only (Ki=0, Kd=0). Increase Kp until oscillation,
@@ -193,14 +215,14 @@
 
 // -- Battery --
 // Voltage divider: V_battery * R2/(R1+R2) = V_pin
-// VOLTAGE_SCALE = (R1+R2)/R2 * (5.0/1023.0)
-// Example: R1=30k, R2=10k => scale = 4.0 * (5.0/1023.0) = 0.01955
-// Adjust this formula for YOUR resistor values:
-#define VOLTAGE_SCALE       (8.0 / 1023.0)  // TODO: measure your divider
+// Adjust DIVIDER_R1 and DIVIDER_R2 to match YOUR resistor values.
+#define DIVIDER_R1          30000.0  // High-side resistor (ohms)
+#define DIVIDER_R2          10000.0  // Low-side resistor (ohms)
+#define VOLTAGE_SCALE       ((DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2 * (5.0 / 1023.0))
 #define VOLTAGE_THRESHOLD   6.5
 
-// -- Turn History --
-#define MAX_TURNS            50   // Max turns to store in memory
+// -- Ultrasonic Filtering --
+#define US_ALPHA            0.3   // EMA smoothing factor (0-1, higher = less smoothing)
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -484,7 +506,7 @@ bool timerRunning(Timer* t) {
 //                    Terminal state.
 // =====================================================
 
-enum RobotState {
+enum RobotState : uint8_t {
   STATE_LINE_FOLLOWING,   // Following black tape with IR sensors
   STATE_WALL_FOLLOWING,   // Following walls with ultrasonic sensors
   STATE_TURNING,          // Non-blocking spin turn in progress
@@ -495,7 +517,7 @@ enum RobotState {
 };
 
 // Direction for spin turns (used by startTurn/startBackupAndTurn)
-enum TurnDir { TURN_LEFT, TURN_RIGHT };
+enum TurnDir : uint8_t { TURN_LEFT, TURN_RIGHT };
 
 // =====================================================
 // SECTION 6: GLOBAL INSTANCES
@@ -553,17 +575,12 @@ RobotState returnState;     // State to resume after turn completes
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
 float dist[3];              // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
+float distFiltered[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
 
 // --- Wall Following State ---
 bool followRightWall = true; // Which wall the PID is tracking (true=right, false=left)
 int wallSwitchCounter = 0;   // Debounce counter for wall switching
-
-// --- Turn History ---
-// Records each turn as 'L' (left) or 'R' (right). Can be used for
-// path simplification (e.g., dead-end elimination: LRL -> S) in
-// future iterations. Currently records but does not simplify.
-char turnHistory[MAX_TURNS];
-int turnIndex = 0;
+int wallTransitionCounter = 0; // Debounce counter for line->wall transition
 
 // =====================================================
 // SECTION 7: DRIVE HELPERS
@@ -609,9 +626,6 @@ void driveBrake() {
 // TURN_90_DURATION ms. The main loop checks timerExpired() each
 // iteration and transitions to afterState when the turn completes.
 //
-// The turn direction is recorded in turnHistory[] for potential
-// path simplification in future runs.
-//
 // Parameters:
 //   dir        - TURN_LEFT or TURN_RIGHT
 //   afterState - state to transition to when the turn finishes
@@ -629,10 +643,6 @@ void startTurn(TurnDir dir, RobotState afterState) {
   timerStart(&stateTimer, TURN_90_DURATION);
   currentState = STATE_TURNING;
 
-  // Record turn in history for path simplification
-  if (turnIndex < MAX_TURNS) {
-    turnHistory[turnIndex++] = (dir == TURN_LEFT) ? 'L' : 'R';
-  }
   DEBUG_PRINTF("Turn %s\n", dir == TURN_LEFT ? "LEFT" : "RIGHT");
 }
 
@@ -704,13 +714,17 @@ void readIRSensors() {
 // so the navigation code treats "no echo" as "far away" rather
 // than "zero distance" (which would look like a wall touching the sensor).
 void readUltrasonicSensors() {
-  dist[0] = sonarFront.ping_cm();
-  dist[1] = sonarLeft.ping_cm();
-  dist[2] = sonarRight.ping_cm();
+  // Read one sensor per call to reduce blocking time (~30ms vs ~90ms)
+  // and prevent echo crosstalk between adjacent sensors.
+  static uint8_t sensorIndex = 0;
+  NewPing* sonars[] = { &sonarFront, &sonarLeft, &sonarRight };
 
-  for (int i = 0; i < 3; i++) {
-    if (dist[i] == 0) dist[i] = MAX_DISTANCE;
-  }
+  float raw = sonars[sensorIndex]->ping_cm();
+  dist[sensorIndex] = (raw == 0) ? MAX_DISTANCE : raw;
+  distFiltered[sensorIndex] = US_ALPHA * dist[sensorIndex]
+                             + (1.0 - US_ALPHA) * distFiltered[sensorIndex];
+
+  sensorIndex = (sensorIndex + 1) % 3;
 }
 
 // lineCount: Return how many of the 4 IR sensors currently detect the line.
@@ -849,9 +863,9 @@ void followWall() {
   // --- Step 1: Junction detection ---
   // A junction is detected by checking which directions are "open"
   // (no wall within WALL_FAR_THRESH cm).
-  bool openFront = (dist[0] > WALL_FAR_THRESH);
-  bool wallLeft  = (dist[1] < WALL_CLOSE_THRESH);
-  bool wallRight = (dist[2] < WALL_CLOSE_THRESH);
+  bool openFront = (distFiltered[0] > WALL_FAR_THRESH);
+  bool wallLeft  = (distFiltered[1] < WALL_CLOSE_THRESH);
+  bool wallRight = (distFiltered[2] < WALL_CLOSE_THRESH);
 
   // T-junction: open ahead, but walls on both sides form the T
   bool tJunction = (openFront && wallLeft && wallRight);
@@ -887,8 +901,8 @@ void followWall() {
   // Switch conditions:
   //   To right wall: right wall is close AND left wall is far
   //   To left wall:  left wall is close AND right wall is far
-  bool shouldSwitchToRight = (dist[2] < WALL_CLOSE_THRESH && dist[1] > WALL_FAR_THRESH);
-  bool shouldSwitchToLeft  = (dist[1] < WALL_CLOSE_THRESH && dist[2] > WALL_FAR_THRESH);
+  bool shouldSwitchToRight = (distFiltered[2] < WALL_CLOSE_THRESH && distFiltered[1] > WALL_FAR_THRESH);
+  bool shouldSwitchToLeft  = (distFiltered[1] < WALL_CLOSE_THRESH && distFiltered[2] > WALL_FAR_THRESH);
 
   if (shouldSwitchToRight && !followRightWall) {
     wallSwitchCounter++;
@@ -917,12 +931,12 @@ void followWall() {
   // --- Step 4: Speed adjustment for tight corridors ---
   // When walls are close on BOTH sides, reduce speed for safety.
   // The robot is in a narrow passage and needs finer control.
-  int speed = (dist[1] < WALL_CLOSE_THRESH && dist[2] < WALL_CLOSE_THRESH)
+  int speed = (distFiltered[1] < WALL_CLOSE_THRESH && distFiltered[2] < WALL_CLOSE_THRESH)
               ? SLOW_SPEED : BASE_SPEED;
 
   // --- Step 5: PID wall distance control ---
   // Measure distance to the wall we're following
-  float wallDist = followRightWall ? dist[2] : dist[1];
+  float wallDist = followRightWall ? distFiltered[2] : distFiltered[1];
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
 
@@ -994,7 +1008,7 @@ bool isWallMazeTransition() {
   }
 
   // Check if walls are detected on at least one side
-  bool wallsPresent = (dist[1] < WALL_FAR_THRESH || dist[2] < WALL_FAR_THRESH);
+  bool wallsPresent = (distFiltered[1] < WALL_FAR_THRESH || distFiltered[2] < WALL_FAR_THRESH);
 
   return lowLineConfidence && wallsPresent;
 }
@@ -1032,9 +1046,9 @@ void switchToWallMode() {
 // Returns true only when all three sensors agree - a single open
 // side (like passing a corridor opening) won't trigger this.
 bool isExitFound() {
-  return (dist[0] > EXIT_THRESHOLD &&
-          dist[1] > EXIT_THRESHOLD &&
-          dist[2] > EXIT_THRESHOLD);
+  return (distFiltered[0] > EXIT_THRESHOLD &&
+          distFiltered[1] > EXIT_THRESHOLD &&
+          distFiltered[2] > EXIT_THRESHOLD);
 }
 
 // victoryBlink: Visual celebration when the maze is solved.
@@ -1101,8 +1115,23 @@ void enterErrorState(const char* message) {
 //     V_battery = raw * (5.0 / 1023.0) * (R1 + R2) / R2
 //   This combined factor is VOLTAGE_SCALE (see Section 3).
 bool checkBattery() {
-  int raw = analogRead(PIN_BATTERY);
-  float voltage = raw * VOLTAGE_SCALE;
+  static unsigned long accumulator = 0;
+  static uint16_t sampleCount = 0;
+  static unsigned long lastEvalTime = 0;
+
+  accumulator += analogRead(PIN_BATTERY);
+  sampleCount++;
+
+  // Evaluate every 500ms
+  unsigned long now = millis();
+  if (now - lastEvalTime < 500) return true;
+  lastEvalTime = now;
+
+  float avgRaw = (float)accumulator / sampleCount;
+  accumulator = 0;
+  sampleCount = 0;
+
+  float voltage = avgRaw * VOLTAGE_SCALE;
   if (voltage < VOLTAGE_THRESHOLD) {
     enterErrorState("Battery voltage below threshold");
     return false;
@@ -1156,10 +1185,23 @@ void setup() {
   // Ensure all motors start stopped
   driveStop();
 
+  // 3-second countdown with LED blinks for safe placement
+  for (int i = 3; i > 0; i--) {
+    DEBUG_PRINTF("Starting in %d...\n", i);
+    digitalWrite(PIN_LED_POWER, HIGH);
+    delay(500);
+    digitalWrite(PIN_LED_POWER, LOW);
+    delay(500);
+  }
+  digitalWrite(PIN_LED_POWER, HIGH);
+
   DEBUG_PRINTLN("Setup complete. Starting line following.");
 }
 
 void loop() {
+  // --- Skip all work in terminal states ---
+  if (currentState == STATE_ERROR || currentState == STATE_EXIT_FOUND) return;
+
   // --- Safety: check battery voltage every iteration ---
   // If battery is low, checkBattery() enters ERROR_STATE and
   // returns false. We skip all navigation logic.
@@ -1183,7 +1225,13 @@ void loop() {
       // wall maze transition zone (tape gone + walls detected).
       followLine();
       if (isWallMazeTransition()) {
-        switchToWallMode();  // -> STATE_MODE_SWITCH
+        wallTransitionCounter++;
+        if (wallTransitionCounter >= WALL_TRANSITION_DEBOUNCE) {
+          wallTransitionCounter = 0;
+          switchToWallMode();  // -> STATE_MODE_SWITCH
+        }
+      } else {
+        wallTransitionCounter = 0;
       }
       break;
 
