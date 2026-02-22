@@ -43,13 +43,17 @@ Each iteration of `loop()` follows these steps:
 
 ## Stuck Detection & Recovery
 
-The stuck-detection watchdog monitors the robot only during the `LINE_FOLLOWING` and `WALL_FOLLOWING` states. At watchdog start (and on every state transition), a snapshot of the `distFiltered[]` array is captured. Each loop iteration, the watchdog compares the current filtered distances against the snapshot. If no sensor value has changed by more than 2.0 cm for a continuous 3000 ms window, the robot is declared stuck.
+The stuck-detection watchdog monitors the robot using three independent signals:
+
+1. **Ultrasonic stagnation** -- during `LINE_FOLLOWING` and `WALL_FOLLOWING`, a snapshot of the `distFiltered[]` array is captured at watchdog start and whenever the robot re-enters a monitored state from a non-monitored state (e.g. returning to `WALL_FOLLOWING` after a turn). Each loop iteration, the watchdog compares current filtered distances against the snapshot. If no sensor value has changed by more than 2.0 cm for a continuous 3000 ms window, the robot is declared stuck.
+2. **PID-output saturation** -- during `LINE_FOLLOWING` and `WALL_FOLLOWING`, the watchdog tracks how long the PID control output stays within `STUCK_PID_THRESHOLD` of its +/- limit. Sustained saturation for 3000 ms indicates the robot is pushing against an obstacle it cannot overcome. The saturation timer resets whenever ultrasonic movement is detected.
+3. **Turn timeout** -- during `STATE_TURNING`, if a turn exceeds `TURN_TIMEOUT_MS` the robot is assumed physically unable to complete the rotation.
 
 Recovery is handled by `startBackupAndTurn()`. The turn direction alternates with each retry: odd-numbered retries turn left, even-numbered retries turn right. This prevents the robot from repeating the same failed escape path. A retry counter tracks the number of recovery attempts within a 5000 ms cooldown window.
 
 If the retry counter reaches 2 without the robot making meaningful progress, the watchdog escalates to `ERROR_STATE` and the robot stops permanently (requiring a hardware reset).
 
-The distance snapshot is refreshed on every state transition. This prevents false positives during turns and backup maneuvers, where the robot is intentionally moving but the filtered distances may not change significantly.
+The distance snapshot and PID saturation timer are captured fresh whenever the robot transitions into `LINE_FOLLOWING` or `WALL_FOLLOWING` from a state where stuck detection is not active. This prevents false positives during turns and backup maneuvers, where the robot is intentionally moving but the filtered distances may not change significantly.
 
 ## File Layout
 

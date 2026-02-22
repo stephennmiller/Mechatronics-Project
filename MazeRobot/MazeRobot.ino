@@ -237,6 +237,8 @@ bool checkStuck();
 #define STUCK_COOLDOWN_MS      5000   // Repeated stuck within this window
                                       // increments retry counter; outside
                                       // this window resets counter to 1
+#define STUCK_PID_THRESHOLD  10.0     // PID output within this of ±255 = saturated
+#define TURN_TIMEOUT_MS      2000     // Turn exceeding this duration = stuck
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -597,6 +599,7 @@ int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
 float dist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
 float distFiltered[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
+float lastPidOutput = 0;            // Last PID output (line or wall), for stuck detection
 
 // --- Wall Following State ---
 bool followRightWall = true; // Which wall the PID is tracking (true=right, false=left)
@@ -821,6 +824,7 @@ void followLine() {
     // the wall transition detector will trigger if we've entered
     // the walled section.
     DEBUG_PRINTLN("Line lost!");
+    lastPidOutput = 0;  // No PID active; avoid false saturation detection
     driveTank(SLOW_SPEED / 2, SLOW_SPEED / 2);
     return;
   }
@@ -830,6 +834,7 @@ void followLine() {
   // Negative error = line is to the left of center
   float error = pos - 1.5;
   float output = pidCompute(&pidLine, error);
+  lastPidOutput = output;
 
   // Apply PID output as a differential: add to left, subtract from right.
   // In differential/skid-steer drive, the robot turns toward the SLOWER side.
@@ -981,6 +986,7 @@ void followWall() {
   float wallDist = followRightWall ? distFiltered[2] : distFiltered[1];
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
+  lastPidOutput = output;
 
   // Apply correction. In skid-steer, the robot turns toward the SLOWER side.
   // The sign is mirrored depending on which wall we're following so that
@@ -1197,55 +1203,100 @@ bool checkBattery() {
 // if stuck recovery has escalated to error state. Returns true
 // otherwise (including during active recovery maneuvers).
 //
-// Only monitors during LINE_FOLLOWING and WALL_FOLLOWING. Stores a
-// snapshot of distFiltered[] and checks if ANY sensor has changed
-// by > STUCK_DIST_THRESHOLD. If none have changed for
-// STUCK_TIMEOUT_MS, triggers recovery via startBackupAndTurn().
-// After STUCK_MAX_RETRIES within STUCK_COOLDOWN_MS, enters error state.
+// Three independent stuck signals:
+//   1. Ultrasonic stagnation — no distFiltered[] sensor changes by
+//      > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS during
+//      LINE_FOLLOWING or WALL_FOLLOWING.
+//   2. PID-output saturation — lastPidOutput stays within
+//      STUCK_PID_THRESHOLD of its ±255 limit for STUCK_TIMEOUT_MS.
+//      Reset when ultrasonic movement is detected.
+//   3. Turn timeout — STATE_TURNING exceeds TURN_TIMEOUT_MS,
+//      indicating the robot cannot physically complete the rotation.
+//
+// Any signal triggers recovery via startBackupAndTurn() with
+// alternating direction. After STUCK_MAX_RETRIES within
+// STUCK_COOLDOWN_MS, enters error state.
 bool checkStuck() {
   static float snapDist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE };
   static unsigned long snapTime = 0;
+  static unsigned long pidSatTime = 0;
   static unsigned long lastRecoveryTime = 0;
   static uint8_t stuckRetryCount = 0;
   static bool wasChecking = false;
 
-  bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
-                      currentState == STATE_WALL_FOLLOWING);
-
-  if (!shouldCheck) {
-    wasChecking = false;
-    return true;
-  }
-
   unsigned long now = millis();
+  bool stuckDetected = false;
+  RobotState resumeState = currentState;
 
-  // Just transitioned into a checked state (e.g. after a turn) —
-  // refresh snapshot so maneuver duration doesn't count toward timeout.
-  if (!wasChecking) {
-    for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
-    snapTime = now;
-    wasChecking = true;
-    return true;
-  }
-
-  // Check if any sensor has changed meaningfully
-  bool hasMoved = false;
-  for (uint8_t i = 0; i < 3; i++) {
-    float diff = distFiltered[i] - snapDist[i];
-    if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
-      hasMoved = true;
-      break;
+  // --- Signal 3: Turn timeout ---
+  // Active during STATE_TURNING. If the turn has been running longer
+  // than TURN_TIMEOUT_MS, the robot is physically unable to rotate.
+  if (currentState == STATE_TURNING) {
+    if (stateTimer.running &&
+        (now - stateTimer.startTime > TURN_TIMEOUT_MS)) {
+      stuckDetected = true;
+      resumeState = returnState;  // Resume the state the turn was returning to
+    } else {
+      wasChecking = false;
+      return true;
     }
   }
 
-  if (hasMoved) {
-    for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
-    snapTime = now;
-    return true;
-  }
+  // --- Signals 1 & 2: Ultrasonic stagnation + PID saturation ---
+  // Active during LINE_FOLLOWING and WALL_FOLLOWING only.
+  if (!stuckDetected) {
+    bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
+                        currentState == STATE_WALL_FOLLOWING);
 
-  // No change — check if timeout has elapsed
-  if (now - snapTime < STUCK_TIMEOUT_MS) return true;
+    if (!shouldCheck) {
+      wasChecking = false;
+      return true;
+    }
+
+    // Just entered a monitored state from a non-monitored state —
+    // capture fresh snapshot so prior maneuver time doesn't accumulate.
+    if (!wasChecking) {
+      for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+      snapTime = now;
+      pidSatTime = 0;
+      wasChecking = true;
+      return true;
+    }
+
+    // Check if any ultrasonic sensor has changed meaningfully
+    bool hasMoved = false;
+    for (uint8_t i = 0; i < 3; i++) {
+      float diff = distFiltered[i] - snapDist[i];
+      if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
+        hasMoved = true;
+        break;
+      }
+    }
+
+    if (hasMoved) {
+      for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+      snapTime = now;
+      pidSatTime = 0;  // Movement detected — reset PID saturation timer
+      return true;
+    }
+
+    // Signal 2: PID-output saturation
+    float pidOut = lastPidOutput;
+    if (pidOut > (255.0 - STUCK_PID_THRESHOLD) ||
+        pidOut < (-255.0 + STUCK_PID_THRESHOLD)) {
+      if (pidSatTime == 0) pidSatTime = now;
+      if (now - pidSatTime >= STUCK_TIMEOUT_MS) stuckDetected = true;
+    } else {
+      pidSatTime = 0;
+    }
+
+    // Signal 1: Ultrasonic stagnation
+    if (!stuckDetected && (now - snapTime >= STUCK_TIMEOUT_MS)) {
+      stuckDetected = true;
+    }
+
+    if (!stuckDetected) return true;
+  }
 
   // === STUCK DETECTED ===
   if (lastRecoveryTime > 0 && (now - lastRecoveryTime < STUCK_COOLDOWN_MS)) {
@@ -1266,7 +1317,7 @@ bool checkStuck() {
   // Recovery: brake, then backup-and-turn in alternating direction
   driveBrake();
   TurnDir escapeDir = (stuckRetryCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
-  startBackupAndTurn(escapeDir, currentState);
+  startBackupAndTurn(escapeDir, resumeState);
 
   lastRecoveryTime = now;
   wasChecking = false;
