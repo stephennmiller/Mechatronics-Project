@@ -194,6 +194,7 @@ bool checkStuck();
 
 // -- Wall/Ultrasonic Calibration --
 #define MAX_DISTANCE        200   // Max ultrasonic range (cm)
+#define NUM_US_SENSORS        3   // Front, left, right ultrasonic sensors
 #define WALL_SETPOINT      25.0   // Target wall-follow distance (cm)
 #define WALL_CLOSE_THRESH    30   // "Wall is nearby" (cm)
 #define WALL_FAR_THRESH      50   // "Wall is far away" (cm)
@@ -597,8 +598,8 @@ unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next 
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
-float dist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
-float distFiltered[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
+float dist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
+float distFiltered[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
 float lastPidOutput = 0;            // Last PID output (line or wall), for stuck detection
 
 // --- Wall Following State ---
@@ -752,7 +753,7 @@ void readUltrasonicSensors() {
   distFiltered[sensorIndex] = US_ALPHA * dist[sensorIndex]
                              + (1.0 - US_ALPHA) * distFiltered[sensorIndex];
 
-  sensorIndex = (sensorIndex + 1) % 3;
+  sensorIndex = (sensorIndex + 1) % NUM_US_SENSORS;
 }
 
 // lineCount: Return how many of the 4 IR sensors currently detect the line.
@@ -1217,7 +1218,7 @@ bool checkBattery() {
 // alternating direction. After STUCK_MAX_RETRIES within
 // STUCK_COOLDOWN_MS, enters error state.
 bool checkStuck() {
-  static float snapDist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE };
+  static float snapDist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE };
   static unsigned long snapTime = 0;
   static unsigned long pidSatTime = 0;
   static unsigned long lastRecoveryTime = 0;
@@ -1256,16 +1257,21 @@ bool checkStuck() {
     // Just entered a monitored state from a non-monitored state —
     // capture fresh snapshot so prior maneuver time doesn't accumulate.
     if (!wasChecking) {
-      for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
       snapTime = now;
       pidSatTime = 0;
       wasChecking = true;
       return true;
     }
 
-    // Check if any ultrasonic sensor has changed meaningfully
+    // Check if any ultrasonic sensor has changed meaningfully.
+    // Skip sensors where both snapshot and current reading are beyond
+    // WALL_FAR_THRESH — HC-SR04 noise at long range (3-4 cm) exceeds
+    // the threshold and would cause false snapshot refreshes.
     bool hasMoved = false;
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) {
+      if (distFiltered[i] > WALL_FAR_THRESH && snapDist[i] > WALL_FAR_THRESH)
+        continue;
       float diff = distFiltered[i] - snapDist[i];
       if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
         hasMoved = true;
@@ -1274,7 +1280,7 @@ bool checkStuck() {
     }
 
     if (hasMoved) {
-      for (uint8_t i = 0; i < 3; i++) snapDist[i] = distFiltered[i];
+      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
       snapTime = now;
       pidSatTime = 0;  // Movement detected — reset PID saturation timer
       return true;
@@ -1305,17 +1311,17 @@ bool checkStuck() {
     stuckRetryCount = 1;
   }
 
-  DEBUG_PRINTF("STUCK #%d  F=%.0f L=%.0f R=%.0f\n",
+  DEBUG_PRINTF("STUCK #%d  F=%d L=%d R=%d\n",
                stuckRetryCount,
-               distFiltered[0], distFiltered[1], distFiltered[2]);
+               (int)distFiltered[0], (int)distFiltered[1],
+               (int)distFiltered[2]);
 
   if (stuckRetryCount > STUCK_MAX_RETRIES) {
     enterErrorState("Stuck: max retries exceeded");
     return false;
   }
 
-  // Recovery: brake, then backup-and-turn in alternating direction
-  driveBrake();
+  // Recovery: backup-and-turn in alternating direction
   TurnDir escapeDir = (stuckRetryCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
   startBackupAndTurn(escapeDir, resumeState);
 

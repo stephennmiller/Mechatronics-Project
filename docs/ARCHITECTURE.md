@@ -23,8 +23,7 @@ stateDiagram-v2
     BACKING_UP --> TURNING : timer expires
     BACKING_UP --> ERROR : low battery
 
-    TURNING --> WALL_FOLLOWING : timer expires (normal)
-    TURNING --> LINE_FOLLOWING : timer expires (stuck recovery)
+    TURNING --> WALL_FOLLOWING : timer expires
     TURNING --> ERROR : low battery
 
     EXIT_FOUND --> [*]
