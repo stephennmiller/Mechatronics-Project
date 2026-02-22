@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.2.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.0) - 2026-02-22
+
+### Added
+
+- Stuck detection watchdog (`checkStuck()`) with three independent signals:
+  - Ultrasonic stagnation — no `distFiltered[]` change >2 cm for 3 seconds
+  - PID-output saturation — control output pinned near ±255 for 3 seconds
+  - Turn timeout — `STATE_TURNING` exceeds 2 seconds
+- Auto-recovery via `startBackupAndTurn()` with alternating left/right escape direction
+- Escalation to `ERROR_STATE` after 2 failed retries within a 5-second cooldown window
+- `NUM_US_SENSORS` constant replacing magic number 3 in sensor arrays
+- `lastPidOutput` global for PID saturation tracking
+- `docs/ARCHITECTURE.md` with Mermaid state machine diagram, loop execution flow, stuck detection algorithm description, and file layout table
+- Constants: `STUCK_TIMEOUT_MS`, `STUCK_DIST_THRESHOLD`, `STUCK_MAX_RETRIES`, `STUCK_COOLDOWN_MS`, `STUCK_PID_THRESHOLD`, `TURN_TIMEOUT_MS`
+
+### Fixed
+
+- Use `%d` with `(int)` casts in `DEBUG_PRINTF` instead of `%.0f` — AVR `snprintf` does not support float format specifiers
+- Skip long-range sensors (>`WALL_FAR_THRESH`) in stuck movement check to prevent HC-SR04 noise from causing false snapshot refreshes
+
 ## [v1.1.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.1.0) - 2026-02-21
 
 ### Added
