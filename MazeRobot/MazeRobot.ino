@@ -27,15 +27,15 @@
 //
 //  STATE MACHINE DIAGRAM:
 //    LINE_FOLLOWING ──> MODE_SWITCH ──> WALL_FOLLOWING
-//                                          │
-//                                    ┌─────┼─────┐
-//                                    v     v     v
-//                              BACKING_UP  │  EXIT_FOUND
-//                                    │     │
-//                                    v     │
-//                                TURNING ──┘
+//          │                               │
+//          │ (stuck)                  ┌─────┼─────┐
+//          └──────> BACKING_UP <─────┘     v     v
+//                        │          (stuck) │  EXIT_FOUND
+//                        v                  │
+//                    TURNING ───────────────┘
 //
-//    Any state can transition to ERROR_STATE on low battery.
+//    Any state can transition to ERROR_STATE on low battery
+//    or repeated stuck detection.
 //
 //  DEPENDENCIES:
 //  - NewPing library (install via Arduino IDE Library Manager)
@@ -63,6 +63,7 @@ bool timerExpired(Timer* t);
 bool timerRunning(Timer* t);
 void startTurn(TurnDir dir, RobotState afterState, unsigned long duration);
 void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDuration);
+bool checkStuck();
 
 // =====================================================
 // SECTION 1: DEBUG TOGGLE
@@ -193,6 +194,7 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
 
 // -- Wall/Ultrasonic Calibration --
 #define MAX_DISTANCE        200   // Max ultrasonic range (cm)
+#define NUM_US_SENSORS        3   // Front, left, right ultrasonic sensors
 #define WALL_SETPOINT      25.0   // Target wall-follow distance (cm)
 #define WALL_CLOSE_THRESH    30   // "Wall is nearby" (cm)
 #define WALL_FAR_THRESH      50   // "Wall is far away" (cm)
@@ -224,6 +226,20 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
 
 // -- Ultrasonic Filtering --
 #define US_ALPHA            0.3   // EMA smoothing factor (0-1, higher = less smoothing)
+
+// -- Stuck Detection / Watchdog --
+// Monitors ultrasonic readings during active navigation. If no sensor
+// changes by more than STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS, the
+// robot is assumed stuck and a recovery maneuver is attempted.
+#define STUCK_TIMEOUT_MS       3000   // No progress for this long = stuck
+#define STUCK_DIST_THRESHOLD    2.0   // cm change in any sensor = "moving"
+                                      // (well above ~0.5cm EMA noise floor)
+#define STUCK_MAX_RETRIES         2   // Recovery attempts before error state
+#define STUCK_COOLDOWN_MS      5000   // Repeated stuck within this window
+                                      // increments retry counter; outside
+                                      // this window resets counter to 1
+#define STUCK_PID_THRESHOLD  10.0     // PID output within this of ±255 = saturated
+#define TURN_TIMEOUT_MS      2000     // Turn exceeding this duration = stuck
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -582,8 +598,9 @@ unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next 
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
-float dist[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
-float distFiltered[3] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
+float dist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
+float distFiltered[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
+float lastPidOutput = 0;            // Last PID output (line or wall), for stuck detection
 
 // --- Wall Following State ---
 bool followRightWall = true; // Which wall the PID is tracking (true=right, false=left)
@@ -736,7 +753,7 @@ void readUltrasonicSensors() {
   distFiltered[sensorIndex] = US_ALPHA * dist[sensorIndex]
                              + (1.0 - US_ALPHA) * distFiltered[sensorIndex];
 
-  sensorIndex = (sensorIndex + 1) % 3;
+  sensorIndex = (sensorIndex + 1) % NUM_US_SENSORS;
 }
 
 // lineCount: Return how many of the 4 IR sensors currently detect the line.
@@ -808,6 +825,7 @@ void followLine() {
     // the wall transition detector will trigger if we've entered
     // the walled section.
     DEBUG_PRINTLN("Line lost!");
+    lastPidOutput = 0;  // No PID active; avoid false saturation detection
     driveTank(SLOW_SPEED / 2, SLOW_SPEED / 2);
     return;
   }
@@ -817,6 +835,7 @@ void followLine() {
   // Negative error = line is to the left of center
   float error = pos - 1.5;
   float output = pidCompute(&pidLine, error);
+  lastPidOutput = output;
 
   // Apply PID output as a differential: add to left, subtract from right.
   // In differential/skid-steer drive, the robot turns toward the SLOWER side.
@@ -968,6 +987,7 @@ void followWall() {
   float wallDist = followRightWall ? distFiltered[2] : distFiltered[1];
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
+  lastPidOutput = output;
 
   // Apply correction. In skid-steer, the robot turns toward the SLOWER side.
   // The sign is mirrored depending on which wall we're following so that
@@ -1098,7 +1118,7 @@ void victoryBlink() {
 }
 
 // =====================================================
-// SECTION 12: ERROR / BATTERY HANDLING
+// SECTION 12: ERROR / BATTERY / STUCK HANDLING
 //
 // Safety systems to protect the robot and its environment.
 //
@@ -1116,6 +1136,13 @@ void victoryBlink() {
 //   LED turns on and the error message is printed via serial.
 //   Future improvement: add a timed recovery check (e.g., re-read
 //   battery after 5 seconds and resume if voltage has recovered).
+//
+// STUCK DETECTION:
+//   Monitors ultrasonic sensor readings during active navigation.
+//   If no sensor changes by > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS,
+//   the robot is assumed stuck. Recovery uses startBackupAndTurn()
+//   with alternating turn directions. After STUCK_MAX_RETRIES
+//   within STUCK_COOLDOWN_MS, escalates to ERROR_STATE.
 // =====================================================
 
 // enterErrorState: Safely stop the robot and indicate an error.
@@ -1171,6 +1198,138 @@ bool checkBattery() {
   return true;
 }
 
+// checkStuck: Detect if the robot is stuck and attempt recovery.
+//
+// Called every loop() iteration after sensor reads. Returns false
+// if stuck recovery has escalated to error state. Returns true
+// otherwise (including during active recovery maneuvers).
+//
+// Three independent stuck signals:
+//   1. Ultrasonic stagnation — no distFiltered[] sensor changes by
+//      > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS during
+//      LINE_FOLLOWING or WALL_FOLLOWING.
+//   2. PID-output saturation — lastPidOutput stays within
+//      STUCK_PID_THRESHOLD of its ±255 limit for STUCK_TIMEOUT_MS.
+//      Reset when ultrasonic movement is detected.
+//   3. Turn timeout — STATE_TURNING exceeds TURN_TIMEOUT_MS,
+//      indicating the robot cannot physically complete the rotation.
+//
+// Any signal triggers recovery via startBackupAndTurn() with
+// alternating direction. After STUCK_MAX_RETRIES within
+// STUCK_COOLDOWN_MS, enters error state.
+bool checkStuck() {
+  static float snapDist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE };
+  static unsigned long snapTime = 0;
+  static unsigned long pidSatTime = 0;
+  static unsigned long lastRecoveryTime = 0;
+  static uint8_t stuckRetryCount = 0;
+  static bool wasChecking = false;
+
+  unsigned long now = millis();
+  bool stuckDetected = false;
+  RobotState resumeState = currentState;
+
+  // --- Signal 3: Turn timeout ---
+  // Active during STATE_TURNING. If the turn has been running longer
+  // than TURN_TIMEOUT_MS, the robot is physically unable to rotate.
+  if (currentState == STATE_TURNING) {
+    if (stateTimer.running &&
+        (now - stateTimer.startTime > TURN_TIMEOUT_MS)) {
+      stuckDetected = true;
+      resumeState = returnState;  // Resume the state the turn was returning to
+    } else {
+      wasChecking = false;
+      return true;
+    }
+  }
+
+  // --- Signals 1 & 2: Ultrasonic stagnation + PID saturation ---
+  // Active during LINE_FOLLOWING and WALL_FOLLOWING only.
+  if (!stuckDetected) {
+    bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
+                        currentState == STATE_WALL_FOLLOWING);
+
+    if (!shouldCheck) {
+      wasChecking = false;
+      return true;
+    }
+
+    // Just entered a monitored state from a non-monitored state —
+    // capture fresh snapshot so prior maneuver time doesn't accumulate.
+    if (!wasChecking) {
+      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
+      snapTime = now;
+      pidSatTime = 0;
+      wasChecking = true;
+      return true;
+    }
+
+    // Check if any ultrasonic sensor has changed meaningfully.
+    // Skip sensors where both snapshot and current reading are beyond
+    // WALL_FAR_THRESH — HC-SR04 noise at long range (3-4 cm) exceeds
+    // the threshold and would cause false snapshot refreshes.
+    bool hasMoved = false;
+    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) {
+      if (distFiltered[i] > WALL_FAR_THRESH && snapDist[i] > WALL_FAR_THRESH)
+        continue;
+      float diff = distFiltered[i] - snapDist[i];
+      if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
+        hasMoved = true;
+        break;
+      }
+    }
+
+    if (hasMoved) {
+      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
+      snapTime = now;
+      pidSatTime = 0;  // Movement detected — reset PID saturation timer
+      return true;
+    }
+
+    // Signal 2: PID-output saturation
+    float pidOut = lastPidOutput;
+    if (pidOut > (255.0 - STUCK_PID_THRESHOLD) ||
+        pidOut < (-255.0 + STUCK_PID_THRESHOLD)) {
+      if (pidSatTime == 0) pidSatTime = now;
+      if (now - pidSatTime >= STUCK_TIMEOUT_MS) stuckDetected = true;
+    } else {
+      pidSatTime = 0;
+    }
+
+    // Signal 1: Ultrasonic stagnation
+    if (!stuckDetected && (now - snapTime >= STUCK_TIMEOUT_MS)) {
+      stuckDetected = true;
+    }
+
+    if (!stuckDetected) return true;
+  }
+
+  // === STUCK DETECTED ===
+  if (lastRecoveryTime > 0 && (now - lastRecoveryTime < STUCK_COOLDOWN_MS)) {
+    stuckRetryCount++;
+  } else {
+    stuckRetryCount = 1;
+  }
+
+  DEBUG_PRINTF("STUCK #%d  F=%d L=%d R=%d\n",
+               stuckRetryCount,
+               (int)distFiltered[0], (int)distFiltered[1],
+               (int)distFiltered[2]);
+
+  if (stuckRetryCount > STUCK_MAX_RETRIES) {
+    enterErrorState("Stuck: max retries exceeded");
+    return false;
+  }
+
+  // Recovery: backup-and-turn in alternating direction
+  TurnDir escapeDir = (stuckRetryCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
+  startBackupAndTurn(escapeDir, resumeState);
+
+  lastRecoveryTime = now;
+  wasChecking = false;
+  return true;
+}
+
 // =====================================================
 // SECTION 13: SETUP & MAIN LOOP
 //
@@ -1187,8 +1346,9 @@ bool checkBattery() {
 // EXECUTION FLOW PER LOOP ITERATION:
 //   1. Check battery -> enter error state if low
 //   2. Read all sensors (IR + ultrasonic)
-//   3. Execute current state's logic
-//   4. State logic may change currentState for next iteration
+//   3. Check stuck -> attempt recovery or enter error state
+//   4. Execute current state's logic
+//   5. State logic may change currentState for next iteration
 // =====================================================
 
 void setup() {
@@ -1245,6 +1405,11 @@ void loop() {
   // can detect emergencies (e.g., unexpected obstacle) mid-maneuver.
   readIRSensors();
   readUltrasonicSensors();
+
+  // --- Safety: detect stuck condition ---
+  // If max retries exceeded, checkStuck() enters ERROR_STATE and
+  // returns false. During active recovery, it returns true.
+  if (!checkStuck()) return;
 
   // --- State machine dispatch ---
   // Each case handles one state's behavior. States transition by
