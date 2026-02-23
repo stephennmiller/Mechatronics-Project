@@ -13,6 +13,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 - **Non-blocking state machine** — no `delay()` calls during navigation; sensors read continuously even during turns
 - **Dynamic wall switching** — debounced left/right wall selection based on sensor readings
 - **Junction handling** — T-junction and four-way detection with consistent left-turn heuristic
+- **IR auto-calibration** — per-sensor thresholds and polarity detected at startup; falls back to hardcoded defaults on failure
 - **Calibration-friendly** — all tunable constants in a single config section at the top of the file
 - **Togglable debug output** — `#define DEBUG` compiles serial output in or out
 - **Per-motor trim offsets** — compensate for physical motor differences without changing PID gains
@@ -108,12 +109,22 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 
 ## Calibration
 
-Before running the maze, tune these values in **Section 3** of `MazeRobot.ino`:
+### IR Auto-Calibration (at startup)
+
+IR thresholds and polarity are automatically calibrated each time the robot powers on. The 4-second calibration window has two phases:
+
+1. **Phase 1 (0–1 s):** Hold the robot still with all IR sensors over the line. The LINE LED blinks fast.
+2. **Phase 2 (1–4 s):** Sweep the robot so the sensors move off the line onto the bare surface. The LINE LED stays solid.
+
+After calibration, per-sensor thresholds and polarity are printed to the serial monitor. If the calibration fails (e.g., the robot wasn't moved), the ERROR LED blinks 3 times and hardcoded defaults (`IR_DEFAULT_*` in Section 3) are used.
+
+### Manual Tuning
+
+Tune these values in **Section 3** of `MazeRobot.ino`:
 
 | Constant | What to do |
 |---|---|
-| `IR_HIGH_ON_LINE` | Read raw serial values over tape vs floor. Set to `1` if higher = on tape. |
-| `IR_LINE_THRESHOLD` | Set halfway between on-tape and off-tape raw readings. |
+| `IR_DEFAULT_*` | Fallback IR thresholds used when auto-calibration fails. |
 | `VOLTAGE_SCALE` | Measure your voltage divider resistors and update the formula. |
 | `TRIM_*` | If the robot drifts, adjust per-motor offsets (+/- 30). |
 | `TURN_90_DURATION` | Run a turn test and adjust until the robot turns exactly 90 degrees. |
