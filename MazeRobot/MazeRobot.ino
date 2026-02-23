@@ -52,6 +52,7 @@ struct Motor;
 struct Timer;
 enum RobotState : uint8_t;
 enum TurnDir : uint8_t;
+enum JunctionStrategy : uint8_t;
 
 void pidReset(PIDController* pid);
 float pidCompute(PIDController* pid, float error);
@@ -61,6 +62,7 @@ void motorBrake(const Motor* m);
 void timerStart(Timer* t, unsigned long durationMs);
 bool timerExpired(Timer* t);
 bool timerRunning(Timer* t);
+TurnDir getJunctionTurn();
 void startTurn(TurnDir dir, RobotState afterState, unsigned long duration);
 void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDuration);
 bool checkStuck();
@@ -546,6 +548,16 @@ enum RobotState : uint8_t {
 // Direction for spin turns (used by startTurn/startBackupAndTurn)
 enum TurnDir : uint8_t { TURN_LEFT, TURN_RIGHT };
 
+// Junction-handling strategy for wall maze navigation.
+// Controls which direction the robot turns at T-junctions and four-way
+// intersections. See Section 6 for the active strategy selection.
+enum JunctionStrategy : uint8_t {
+  STRATEGY_LEFT_WALL,    // Always turn left (left-wall following)
+  STRATEGY_RIGHT_WALL,   // Always turn right (right-wall following)
+  STRATEGY_ALTERNATING,  // Alternate left/right at each junction
+  STRATEGY_RANDOM        // Random turn direction (seeded from floating pin)
+};
+
 // =====================================================
 // SECTION 6: GLOBAL INSTANCES
 //
@@ -601,6 +613,13 @@ TurnDir pendingTurn;        // Direction of the next/current turn
 RobotState returnState;     // State to resume after turn completes
 unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next turn
 
+// --- Junction Strategy ---
+// Controls turn direction at T-junctions and four-way intersections.
+// Change junctionStrategy to experiment with different solving algorithms.
+// See JunctionStrategy enum in Section 5 for options.
+JunctionStrategy junctionStrategy = STRATEGY_LEFT_WALL;
+uint8_t junctionCount = 0;  // Junction counter for STRATEGY_ALTERNATING
+
 // --- Sensor Data ---
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
@@ -649,6 +668,32 @@ void driveStop() {
 // back-EMF resistance. Much faster stop than driveStop().
 void driveBrake() {
   for (int i = 0; i < NUM_MOTORS; i++) motorBrake(allMotors[i]);
+}
+
+// getJunctionTurn: Decide which direction to turn at a junction based on
+// the active junctionStrategy. Called from followWall() when a T-junction
+// or four-way intersection is detected.
+TurnDir getJunctionTurn() {
+  TurnDir dir;
+  switch (junctionStrategy) {
+    case STRATEGY_RIGHT_WALL:
+      dir = TURN_RIGHT;
+      break;
+    case STRATEGY_ALTERNATING:
+      dir = (junctionCount % 2 == 0) ? TURN_LEFT : TURN_RIGHT;
+      junctionCount++;
+      break;
+    case STRATEGY_RANDOM:
+      dir = random(2) ? TURN_LEFT : TURN_RIGHT;
+      break;
+    case STRATEGY_LEFT_WALL:
+    default:
+      dir = TURN_LEFT;
+      break;
+  }
+  DEBUG_PRINTF("Junction #%d -> %s\n", (int)junctionCount,
+               dir == TURN_LEFT ? "LEFT" : "RIGHT");
+  return dir;
 }
 
 // startTurn: Begin a non-blocking spin turn.
@@ -894,9 +939,9 @@ void followLine() {
 //   5. Run PID on wall distance -> apply speed differential
 //
 // JUNCTION HANDLING:
-//   For a simply-connected maze (no loops/islands), a consistent
-//   turn direction at every junction guarantees solving the maze.
-//   We use left-turn-first, which is equivalent to left-wall following.
+//   Turn direction at junctions is determined by junctionStrategy
+//   (see getJunctionTurn() in Section 7). Default is left-wall following,
+//   which guarantees solving any simply-connected maze (no loops/islands).
 //
 // WALL SWITCHING:
 //   The robot tracks whichever wall is closest, with a debounce counter
@@ -924,11 +969,8 @@ void followWall() {
   bool fourWay   = (openFront && !wallLeft && !wallRight);
 
   if (tJunction || fourWay) {
-    // Always turn left at junctions. For a simply-connected maze,
-    // this is equivalent to left-wall following and guarantees the
-    // robot will eventually find the exit (though not necessarily
-    // by the shortest path).
-    startTurn(TURN_LEFT, STATE_WALL_FOLLOWING);
+    TurnDir junctionDir = getJunctionTurn();
+    startTurn(junctionDir, STATE_WALL_FOLLOWING);
     return;
   }
 
@@ -1375,6 +1417,10 @@ void setup() {
     DEBUG_PRINTLN("MazeRobot starting...");
   #endif
 
+  // Seed random number generator from floating analog pin (noise source).
+  // Needed by STRATEGY_RANDOM but cheap and harmless to always include.
+  randomSeed(analogRead(A5));
+
   // Initialize all motor pins (enable + 2 direction each)
   for (int i = 0; i < NUM_MOTORS; i++) motorInit(allMotors[i]);
 
@@ -1403,6 +1449,21 @@ void setup() {
     delay(500);
   }
   digitalWrite(PIN_LED_POWER, HIGH);
+
+  // Log active junction strategy
+  #ifdef DEBUG
+  {
+    const char* stratName;
+    switch (junctionStrategy) {
+      case STRATEGY_LEFT_WALL:   stratName = "LEFT_WALL";   break;
+      case STRATEGY_RIGHT_WALL:  stratName = "RIGHT_WALL";  break;
+      case STRATEGY_ALTERNATING: stratName = "ALTERNATING";  break;
+      case STRATEGY_RANDOM:      stratName = "RANDOM";       break;
+      default:                   stratName = "UNKNOWN";      break;
+    }
+    DEBUG_PRINTF("Junction strategy: %s\n", stratName);
+  }
+  #endif
 
   DEBUG_PRINTLN("Setup complete. Starting line following.");
 }
