@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v1.2.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.1) - 2026-02-22
+## [v1.2.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.1) - 2026-02-22 ([#35](https://github.com/stephennmiller/Mechatronics-Project/pull/35))
 
 ### Added
 
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DEBUG_PRINTF` buffer increased from 80 to 120 characters
 - `VOLTAGE_SCALE` macro now has explicit parentheses around division: `(((R1+R2)/R2) * (5.0/1023.0))`
 
-## [v1.2.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.0) - 2026-02-22
+## [v1.2.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.0) - 2026-02-22 ([#34](https://github.com/stephennmiller/Mechatronics-Project/pull/34))
 
 ### Added
 
@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use `%d` with `(int)` casts in `DEBUG_PRINTF` instead of `%.0f` — AVR `snprintf` does not support float format specifiers
 - Skip long-range sensors (>`WALL_FAR_THRESH`) in stuck movement check to prevent HC-SR04 noise from causing false snapshot refreshes
 
-## [v1.1.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.1.0) - 2026-02-21
+## [v1.1.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.1.0) - 2026-02-21 ([#33](https://github.com/stephennmiller/Mechatronics-Project/pull/33))
 
 ### Added
 
@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pendingTurnDuration` global to carry turn duration through the backup-then-turn state sequence
 - Optional `duration` parameter to `startTurn()` and `startBackupAndTurn()` with defaults preserving existing behavior
 
-## [v1.0.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.0.1) - 2026-02-21
+## [v1.0.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.0.1) - 2026-02-21 ([#2](https://github.com/stephennmiller/Mechatronics-Project/pull/2))
 
 ### Fixed
 
@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make `irPins[]` and `sonars[]` `static const` to avoid rebuilding constant arrays on the stack every `loop()` iteration
 
-## [v1.0.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.0.0) - 2026-02-21
+## [v1.0.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.0.0) - 2026-02-21 ([#1](https://github.com/stephennmiller/Mechatronics-Project/pull/1))
 
 ### Added
 
