@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.2.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.1) - 2026-02-22
+
+### Added
+
+- `USIndex` enum (`US_FRONT`, `US_LEFT`, `US_RIGHT`) replacing raw `[0]`/`[1]`/`[2]` indices on `dist[]` and `distFiltered[]`
+- `BACKUP_SPEED` constant replacing `BASE_SPEED / 2` in `startBackupAndTurn()`
+- `LINE_MIN_SPEED` constant (`-50`) allowing negative wheel speeds in `followLine()` for sharper PID corrections
+- `NUM_MOTORS` constant replacing magic `4` in motor loop iterations
+- `stateTimer` FSM invariant comment documenting single-timed-state design
+
+### Changed
+
+- `readUltrasonicSensors()` now uses front-priority scheduling: front sensor reads every call, left/right alternate — halves obstacle detection latency (~90ms to ~60ms)
+- `followLine()` PID constrain floor changed from `0` to `LINE_MIN_SPEED` (`-50`)
+- `DEBUG_PRINTF` buffer increased from 80 to 120 characters
+- `VOLTAGE_SCALE` macro now has explicit parentheses around division: `(((R1+R2)/R2) * (5.0/1023.0))`
+
 ## [v1.2.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.2.0) - 2026-02-22
 
 ### Added
