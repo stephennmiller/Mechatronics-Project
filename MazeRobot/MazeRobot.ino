@@ -84,10 +84,10 @@ bool checkStuck();
   #define DEBUG_PRINTLN(x)  Serial.println(x)
 
   // DEBUG_PRINTF: formatted output using snprintf into a stack buffer.
-  // Limited to 80 chars per message. Uses the GCC ## extension to
+  // Limited to 120 chars per message. Uses the GCC ## extension to
   // handle zero variadic arguments gracefully.
   #define DEBUG_PRINTF(fmt, ...) do { \
-    char _dbuf[80]; \
+    char _dbuf[120]; \
     snprintf(_dbuf, sizeof(_dbuf), fmt, ##__VA_ARGS__); \
     Serial.print(_dbuf); \
   } while(0)
@@ -165,9 +165,12 @@ bool checkStuck();
 // =====================================================
 
 // -- Motor Calibration --
+#define NUM_MOTORS            4   // Left-front, left-rear, right-front, right-rear
 #define BASE_SPEED          150   // Default forward PWM (0-255)
 #define SLOW_SPEED          100   // Tight-space PWM
 #define TURN_SPEED           75   // PWM during spin turns
+#define BACKUP_SPEED         75   // PWM during reverse before turns
+#define LINE_MIN_SPEED      -50   // Min wheel speed in line PID (negative = reverse for sharp turns)
 
 // Per-motor speed trim offsets (-30 to +30).
 // If the robot drifts right, increase left trims or decrease right trims.
@@ -194,7 +197,8 @@ bool checkStuck();
 
 // -- Wall/Ultrasonic Calibration --
 #define MAX_DISTANCE        200   // Max ultrasonic range (cm)
-#define NUM_US_SENSORS        3   // Front, left, right ultrasonic sensors
+// Named indices for ultrasonic sensor arrays (dist[], distFiltered[])
+enum USIndex : uint8_t { US_FRONT = 0, US_LEFT = 1, US_RIGHT = 2, NUM_US_SENSORS = 3 };
 #define WALL_SETPOINT      25.0   // Target wall-follow distance (cm)
 #define WALL_CLOSE_THRESH    30   // "Wall is nearby" (cm)
 #define WALL_FAR_THRESH      50   // "Wall is far away" (cm)
@@ -221,7 +225,7 @@ bool checkStuck();
 // Adjust DIVIDER_R1 and DIVIDER_R2 to match YOUR resistor values.
 #define DIVIDER_R1          30000.0  // High-side resistor (ohms)
 #define DIVIDER_R2          10000.0  // Low-side resistor (ohms)
-#define VOLTAGE_SCALE       ((DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2 * (5.0 / 1023.0))
+#define VOLTAGE_SCALE       (((DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2) * (5.0 / 1023.0))
 #define VOLTAGE_THRESHOLD   6.5
 
 // -- Ultrasonic Filtering --
@@ -586,6 +590,9 @@ PIDController pidWall = {
 // --- State Machine ---
 RobotState currentState = STATE_LINE_FOLLOWING;  // Start in line mode
 Timer stateTimer = { 0, 0, false };              // Shared timer for timed states
+                                                  // INVARIANT: only one timed state
+                                                  // (BACKING_UP, TURNING, MODE_SWITCH)
+                                                  // is active at a time by FSM design
 
 // --- Turn Management ---
 // When a turn or backup is initiated, these track what turn to perform
@@ -598,7 +605,7 @@ unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next 
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
 int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
 bool irOnLine[4];           // Processed: true if sensor i detects the line
-float dist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances: [0]=front, [1]=left, [2]=right (cm)
+float dist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances indexed by USIndex (cm)
 float distFiltered[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
 float lastPidOutput = 0;            // Last PID output (line or wall), for stuck detection
 
@@ -633,7 +640,7 @@ void driveTank(int leftSpeed, int rightSpeed) {
 // driveStop: Coast all motors (free-spin to a stop).
 // Use this for normal stops where gradual deceleration is fine.
 void driveStop() {
-  for (int i = 0; i < 4; i++) motorSet(allMotors[i], 0);
+  for (int i = 0; i < NUM_MOTORS; i++) motorSet(allMotors[i], 0);
 }
 
 // driveBrake: Active electromagnetic braking on all motors.
@@ -641,7 +648,7 @@ void driveStop() {
 // hitting a wall). The L298N shorts the motor terminals, creating
 // back-EMF resistance. Much faster stop than driveStop().
 void driveBrake() {
-  for (int i = 0; i < 4; i++) motorBrake(allMotors[i]);
+  for (int i = 0; i < NUM_MOTORS; i++) motorBrake(allMotors[i]);
 }
 
 // startTurn: Begin a non-blocking spin turn.
@@ -688,7 +695,7 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
   pendingTurn = dir;
   returnState = afterState;
   pendingTurnDuration = turnDuration;
-  driveTank(-BASE_SPEED / 2, -BASE_SPEED / 2);  // Reverse at half speed
+  driveTank(-BACKUP_SPEED, -BACKUP_SPEED);  // Reverse at backup speed
   timerStart(&stateTimer, BACKUP_DURATION);
   currentState = STATE_BACKING_UP;
 }
@@ -731,29 +738,37 @@ void readIRSensors() {
   }
 }
 
-// readUltrasonicSensors: Read all 3 ultrasonic sensors.
+// readUltrasonicSensors: Read ultrasonic sensors with front-priority scheduling.
 //
-// Populates dist[0..2] with distances in centimeters:
-//   dist[0] = front sensor
-//   dist[1] = left sensor
-//   dist[2] = right sensor
+// Reads TWO sensors per call (~60ms): the front sensor every time, plus
+// one side sensor alternating left/right. This halves front-obstacle
+// detection latency compared to a simple round-robin.
+//
+// Populates dist[] and distFiltered[] indexed by USIndex.
 //
 // NewPing's ping_cm() returns 0 when no echo is received (object
 // is beyond MAX_DISTANCE or sensor error). We map 0 -> MAX_DISTANCE
 // so the navigation code treats "no echo" as "far away" rather
 // than "zero distance" (which would look like a wall touching the sensor).
 void readUltrasonicSensors() {
-  // Read one sensor per call to reduce blocking time (~30ms vs ~90ms)
-  // and prevent echo crosstalk between adjacent sensors.
-  static uint8_t sensorIndex = 0;
+  // Read two sensors per call: FRONT every time (halves obstacle-detection
+  // latency from ~90ms to ~60ms), plus one side sensor alternating L/R.
+  static uint8_t sideIndex = US_LEFT;  // alternates between US_LEFT and US_RIGHT
   static NewPing* const sonars[] = { &sonarFront, &sonarLeft, &sonarRight };
 
-  float raw = sonars[sensorIndex]->ping_cm();
-  dist[sensorIndex] = (raw == 0) ? MAX_DISTANCE : raw;
-  distFiltered[sensorIndex] = US_ALPHA * dist[sensorIndex]
-                             + (1.0 - US_ALPHA) * distFiltered[sensorIndex];
+  // Always read front sensor first
+  float raw = sonars[US_FRONT]->ping_cm();
+  dist[US_FRONT] = (raw == 0) ? MAX_DISTANCE : raw;
+  distFiltered[US_FRONT] = US_ALPHA * dist[US_FRONT]
+                          + (1.0 - US_ALPHA) * distFiltered[US_FRONT];
 
-  sensorIndex = (sensorIndex + 1) % NUM_US_SENSORS;
+  // Then read alternating side sensor
+  raw = sonars[sideIndex]->ping_cm();
+  dist[sideIndex] = (raw == 0) ? MAX_DISTANCE : raw;
+  distFiltered[sideIndex] = US_ALPHA * dist[sideIndex]
+                           + (1.0 - US_ALPHA) * distFiltered[sideIndex];
+
+  sideIndex = (sideIndex == US_LEFT) ? US_RIGHT : US_LEFT;
 }
 
 // lineCount: Return how many of the 4 IR sensors currently detect the line.
@@ -844,8 +859,8 @@ void followLine() {
   //   -> leftSpeed = BASE + output (faster)
   //   -> rightSpeed = BASE - output (slower)
   //   -> slower right side -> robot turns RIGHT toward the line
-  int leftSpeed = constrain(BASE_SPEED + (int)output, 0, 255);
-  int rightSpeed = constrain(BASE_SPEED - (int)output, 0, 255);
+  int leftSpeed = constrain(BASE_SPEED + (int)output, LINE_MIN_SPEED, 255);
+  int rightSpeed = constrain(BASE_SPEED - (int)output, LINE_MIN_SPEED, 255);
   driveTank(leftSpeed, rightSpeed);
 
   // Throttled debug output (every 200ms to avoid serial flooding)
@@ -897,9 +912,9 @@ void followWall() {
   // --- Step 1: Junction detection ---
   // A junction is detected by checking which directions are "open"
   // (no wall within WALL_FAR_THRESH cm).
-  bool openFront = (distFiltered[0] > WALL_FAR_THRESH);
-  bool wallLeft  = (distFiltered[1] < WALL_CLOSE_THRESH);
-  bool wallRight = (distFiltered[2] < WALL_CLOSE_THRESH);
+  bool openFront = (distFiltered[US_FRONT] > WALL_FAR_THRESH);
+  bool wallLeft  = (distFiltered[US_LEFT]  < WALL_CLOSE_THRESH);
+  bool wallRight = (distFiltered[US_RIGHT] < WALL_CLOSE_THRESH);
 
   // T-junction: open ahead, but walls on both sides form the T
   bool tJunction = (openFront && wallLeft && wallRight);
@@ -918,9 +933,9 @@ void followWall() {
   // --- Dead-end detection ---
   // All three sides blocked = dead end. Perform a 180-degree U-turn
   // instead of the two-cycle 90+90 recovery.
-  bool deadEnd = (distFiltered[0] < FRONT_OBSTACLE_DIST) &&
-                 (distFiltered[1] < WALL_CLOSE_THRESH) &&
-                 (distFiltered[2] < WALL_CLOSE_THRESH);
+  bool deadEnd = (distFiltered[US_FRONT] < FRONT_OBSTACLE_DIST) &&
+                 (distFiltered[US_LEFT]  < WALL_CLOSE_THRESH) &&
+                 (distFiltered[US_RIGHT] < WALL_CLOSE_THRESH);
 
   if (deadEnd) {
     DEBUG_PRINTLN("Dead end detected");
@@ -932,7 +947,7 @@ void followWall() {
   // --- Step 2: Front obstacle avoidance ---
   // If a wall is directly ahead and too close, back up first
   // (to create clearance) then turn away from the followed wall.
-  if (distFiltered[0] < FRONT_OBSTACLE_DIST) {
+  if (distFiltered[US_FRONT] < FRONT_OBSTACLE_DIST) {
     // Turn away from the wall we're following:
     //   Following right wall -> turn left (away from right)
     //   Following left wall  -> turn right (away from left)
@@ -949,8 +964,8 @@ void followWall() {
   // Switch conditions:
   //   To right wall: right wall is close AND left wall is far
   //   To left wall:  left wall is close AND right wall is far
-  bool shouldSwitchToRight = (distFiltered[2] < WALL_CLOSE_THRESH && distFiltered[1] > WALL_FAR_THRESH);
-  bool shouldSwitchToLeft  = (distFiltered[1] < WALL_CLOSE_THRESH && distFiltered[2] > WALL_FAR_THRESH);
+  bool shouldSwitchToRight = (distFiltered[US_RIGHT] < WALL_CLOSE_THRESH && distFiltered[US_LEFT]  > WALL_FAR_THRESH);
+  bool shouldSwitchToLeft  = (distFiltered[US_LEFT]  < WALL_CLOSE_THRESH && distFiltered[US_RIGHT] > WALL_FAR_THRESH);
 
   if (shouldSwitchToRight && !followRightWall) {
     wallSwitchCounter++;
@@ -979,12 +994,12 @@ void followWall() {
   // --- Step 4: Speed adjustment for tight corridors ---
   // When walls are close on BOTH sides, reduce speed for safety.
   // The robot is in a narrow passage and needs finer control.
-  int speed = (distFiltered[1] < WALL_CLOSE_THRESH && distFiltered[2] < WALL_CLOSE_THRESH)
+  int speed = (distFiltered[US_LEFT] < WALL_CLOSE_THRESH && distFiltered[US_RIGHT] < WALL_CLOSE_THRESH)
               ? SLOW_SPEED : BASE_SPEED;
 
   // --- Step 5: PID wall distance control ---
   // Measure distance to the wall we're following
-  float wallDist = followRightWall ? distFiltered[2] : distFiltered[1];
+  float wallDist = followRightWall ? distFiltered[US_RIGHT] : distFiltered[US_LEFT];
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
   lastPidOutput = output;
@@ -1060,7 +1075,7 @@ bool isWallMazeTransition() {
   }
 
   // Check if walls are detected on at least one side
-  bool wallsPresent = (distFiltered[1] < WALL_FAR_THRESH || distFiltered[2] < WALL_FAR_THRESH);
+  bool wallsPresent = (distFiltered[US_LEFT] < WALL_FAR_THRESH || distFiltered[US_RIGHT] < WALL_FAR_THRESH);
 
   return lowLineConfidence && wallsPresent;
 }
@@ -1098,14 +1113,14 @@ void switchToWallMode() {
 // Returns true only when all three sensors agree - a single open
 // side (like passing a corridor opening) won't trigger this.
 bool isExitFound() {
-  return (distFiltered[0] > EXIT_THRESHOLD &&
-          distFiltered[1] > EXIT_THRESHOLD &&
-          distFiltered[2] > EXIT_THRESHOLD);
+  return (distFiltered[US_FRONT] > EXIT_THRESHOLD &&
+          distFiltered[US_LEFT]  > EXIT_THRESHOLD &&
+          distFiltered[US_RIGHT] > EXIT_THRESHOLD);
 }
 
 // victoryBlink: Visual celebration when the maze is solved.
-// Blinks the wall LED 5 times. Uses blocking delay() here because
-// the robot is permanently stopped at this point - no need for
+// Blinks the wall LED 5 times. INTENTIONAL: Uses blocking delay() here
+// because the robot is permanently stopped at this point - no need for
 // non-blocking timing.
 void victoryBlink() {
   DEBUG_PRINTLN("=== EXIT FOUND ===");
@@ -1313,8 +1328,8 @@ bool checkStuck() {
 
   DEBUG_PRINTF("STUCK #%d  F=%d L=%d R=%d\n",
                stuckRetryCount,
-               (int)distFiltered[0], (int)distFiltered[1],
-               (int)distFiltered[2]);
+               (int)distFiltered[US_FRONT], (int)distFiltered[US_LEFT],
+               (int)distFiltered[US_RIGHT]);
 
   if (stuckRetryCount > STUCK_MAX_RETRIES) {
     enterErrorState("Stuck: max retries exceeded");
@@ -1358,8 +1373,8 @@ void setup() {
     DEBUG_PRINTLN("MazeRobot starting...");
   #endif
 
-  // Initialize all 4 motor pins (enable + 2 direction each)
-  for (int i = 0; i < 4; i++) motorInit(allMotors[i]);
+  // Initialize all motor pins (enable + 2 direction each)
+  for (int i = 0; i < NUM_MOTORS; i++) motorInit(allMotors[i]);
 
   // Initialize all 6 LED pins and turn them all off
   const int ledPins[] = { PIN_LED_POWER, PIN_LED_ERROR, PIN_LED_LINE,
