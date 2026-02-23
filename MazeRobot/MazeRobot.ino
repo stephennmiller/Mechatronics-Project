@@ -753,6 +753,8 @@ void readIRSensors() {
 void readUltrasonicSensors() {
   // Read two sensors per call: FRONT every time (halves obstacle-detection
   // latency from ~90ms to ~60ms), plus one side sensor alternating L/R.
+  // TRADEOFF: ~60ms blocking per loop() vs ~30ms with single-sensor round-robin.
+  // Revert to single-read if loop timing budget is too tight.
   static uint8_t sideIndex = US_LEFT;  // alternates between US_LEFT and US_RIGHT
   static NewPing* const sonars[] = { &sonarFront, &sonarLeft, &sonarRight };
 
