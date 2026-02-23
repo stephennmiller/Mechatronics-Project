@@ -161,6 +161,9 @@ bool checkStuck();
 // Battery voltage sense (via voltage divider to keep within 0-5V)
 #define PIN_BATTERY    A4
 
+// Floating (unconnected) analog pin used as noise source for randomSeed()
+#define PIN_RANDOM_SEED A5
+
 // =====================================================
 // SECTION 3: CALIBRATION CONSTANTS
 // >>> TUNE THESE ON THE ACTUAL ROBOT <<<
@@ -246,6 +249,9 @@ enum USIndex : uint8_t { US_FRONT = 0, US_LEFT = 1, US_RIGHT = 2, NUM_US_SENSORS
                                       // this window resets counter to 1
 #define STUCK_PID_THRESHOLD  10.0     // PID output within this of ±255 = saturated
 #define TURN_TIMEOUT_MS      2000     // Turn exceeding this duration = stuck
+
+// -- Junction Strategy --
+// See Section 6 (junctionStrategy) for maze-solving algorithm selection.
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -674,14 +680,14 @@ void driveBrake() {
 // the active junctionStrategy. Called from followWall() when a T-junction
 // or four-way intersection is detected.
 TurnDir getJunctionTurn() {
+  junctionCount++;
   TurnDir dir;
   switch (junctionStrategy) {
     case STRATEGY_RIGHT_WALL:
       dir = TURN_RIGHT;
       break;
     case STRATEGY_ALTERNATING:
-      dir = (junctionCount % 2 == 0) ? TURN_LEFT : TURN_RIGHT;
-      junctionCount++;
+      dir = (junctionCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
       break;
     case STRATEGY_RANDOM:
       dir = random(2) ? TURN_LEFT : TURN_RIGHT;
@@ -1419,7 +1425,7 @@ void setup() {
 
   // Seed random number generator from floating analog pin (noise source).
   // Needed by STRATEGY_RANDOM but cheap and harmless to always include.
-  randomSeed(analogRead(A5));
+  randomSeed(analogRead(PIN_RANDOM_SEED));
 
   // Initialize all motor pins (enable + 2 direction each)
   for (int i = 0; i < NUM_MOTORS; i++) motorInit(allMotors[i]);
