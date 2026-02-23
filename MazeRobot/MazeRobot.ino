@@ -910,6 +910,7 @@ void calibrateIRSensors() {
 
   unsigned long calStart = millis();
   unsigned long lastSample = calStart;
+  unsigned long lastBlink = calStart;
   bool phase1 = true;
   bool ledState = false;
 
@@ -926,7 +927,8 @@ void calibrateIRSensors() {
     }
 
     // Phase 1 LED: fast blink (100ms toggle)
-    if (phase1 && (now - lastSample >= 100)) {
+    if (phase1 && (now - lastBlink >= 100)) {
+      lastBlink = now;
       ledState = !ledState;
       digitalWrite(PIN_LED_LINE, ledState ? HIGH : LOW);
     }
