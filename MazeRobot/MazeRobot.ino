@@ -193,12 +193,17 @@ bool checkStuck();
 #define MODE_SWITCH_PAUSE   500   // ms pause when switching line->wall
 
 // -- IR Sensor Calibration --
-// IR_HIGH_ON_LINE: set to 1 if higher analog value = sensor over black tape.
-// Set to 0 if higher value = sensor over light surface (reflective).
-// If unsure, read raw values via Serial and check.
-#define IR_HIGH_ON_LINE       1
-#define IR_LINE_THRESHOLD   500   // Threshold for "sensor sees line"
-#define IR_NO_LINE_THRESH   200   // Below this on ALL sensors = no line detected
+// Hardcoded defaults (fallback if auto-calibration fails)
+#define IR_DEFAULT_HIGH_ON_LINE   1
+#define IR_DEFAULT_LINE_THRESH  500
+#define IR_DEFAULT_NO_LINE_THRESH 200
+
+// Auto-calibration parameters
+#define NUM_IR_SENSORS           4
+#define IR_CAL_DURATION_MS    4000   // Total calibration window
+#define IR_CAL_SETTLE_MS      1000   // Phase 1: on-line baseline collection
+#define IR_CAL_SAMPLE_INTERVAL  10   // ms between reads during cal
+#define IR_CAL_MIN_RANGE       100   // Min (max-min) per sensor for valid cal
 
 // -- Wall/Ultrasonic Calibration --
 #define MAX_DISTANCE        200   // Max ultrasonic range (cm)
@@ -626,10 +631,18 @@ unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next 
 JunctionStrategy junctionStrategy = STRATEGY_LEFT_WALL;
 uint8_t junctionCount = 0;  // Junction counter for STRATEGY_ALTERNATING
 
+// --- IR Calibration State ---
+// Populated by calibrateIRSensors() at startup. If auto-calibration fails,
+// all arrays are loaded with IR_DEFAULT_* values and irCalibrated stays false.
+int  irLineThresh[NUM_IR_SENSORS];      // Per-sensor line detection threshold
+int  irNoLineThresh[NUM_IR_SENSORS];    // Per-sensor "no line" threshold
+bool irHighOnLine = IR_DEFAULT_HIGH_ON_LINE;  // Polarity (runtime)
+bool irCalibrated = false;              // Whether auto-cal succeeded
+
 // --- Sensor Data ---
 // Updated every loop iteration by readIRSensors() and readUltrasonicSensors().
-int irRaw[4];               // Raw analog readings (0-1023) from IR sensors
-bool irOnLine[4];           // Processed: true if sensor i detects the line
+int irRaw[NUM_IR_SENSORS];               // Raw analog readings (0-1023) from IR sensors
+bool irOnLine[NUM_IR_SENSORS];           // Processed: true if sensor i detects the line
 float dist[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // Ultrasonic distances indexed by USIndex (cm)
 float distFiltered[NUM_US_SENSORS] = { MAX_DISTANCE, MAX_DISTANCE, MAX_DISTANCE }; // EMA-smoothed distances
 float lastPidOutput = 0;            // Last PID output (line or wall), for stuck detection
@@ -761,30 +774,22 @@ void startBackupAndTurn(TurnDir dir, RobotState afterState, unsigned long turnDu
 // because the state machine is non-blocking.
 // =====================================================
 
-// readIRSensors: Read all 4 IR sensors and determine which ones see the line.
+// readIRSensors: Read all IR sensors and determine which ones see the line.
 //
 // Populates two arrays:
 //   irRaw[0..3]    - raw analog values (0-1023)
 //   irOnLine[0..3] - boolean: true if that sensor detects the line
 //
-// The IR_HIGH_ON_LINE constant controls polarity interpretation:
-//   If 1: higher raw value = sensor is over the black tape
-//   If 0: lower raw value = sensor is over the black tape
-//
-// HOW TO CALIBRATE:
-//   1. Enable DEBUG, open Serial Monitor at 115200 baud
-//   2. Hold each sensor over the black tape, note the raw value
-//   3. Hold each sensor over the light surface, note the raw value
-//   4. Set IR_LINE_THRESHOLD halfway between those two values
-//   5. Set IR_HIGH_ON_LINE based on which reading was higher
+// Uses per-sensor thresholds from irLineThresh[] and runtime polarity
+// from irHighOnLine, both set by calibrateIRSensors() at startup.
 void readIRSensors() {
   static const int irPins[] = { PIN_IR1, PIN_IR2, PIN_IR3, PIN_IR4 };
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
     irRaw[i] = analogRead(irPins[i]);
-    if (IR_HIGH_ON_LINE) {
-      irOnLine[i] = (irRaw[i] >= IR_LINE_THRESHOLD);
+    if (irHighOnLine) {
+      irOnLine[i] = (irRaw[i] >= irLineThresh[i]);
     } else {
-      irOnLine[i] = (irRaw[i] <= IR_LINE_THRESHOLD);
+      irOnLine[i] = (irRaw[i] <= irLineThresh[i]);
     }
   }
 }
@@ -828,7 +833,7 @@ void readUltrasonicSensors() {
 // Useful for detecting intersections (3-4 sensors) or line loss (0 sensors).
 int lineCount() {
   int count = 0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
     if (irOnLine[i]) count++;
   }
   return count;
@@ -844,22 +849,167 @@ int lineCount() {
 // over the line contributes more weight than one at the edge. This gives
 // sub-sensor-spacing resolution for smooth PID tracking.
 //
-// Example with IR_HIGH_ON_LINE=1:
+// Example with irHighOnLine=true:
 //   irRaw = [50, 800, 900, 50]  -> sensors 1,2 see the line
 //   position = (0*0 + 800*1 + 900*2 + 0*3) / (0+800+900+0) = 2600/1700 = 1.53
 //   Error = 1.53 - 1.5 = +0.03 (very slightly right of center)
 float linePosition() {
   float weightedSum = 0;
   float totalWeight = 0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
     // Weight = raw intensity for on-line sensors, 0 for off-line sensors.
-    // If IR_HIGH_ON_LINE=0, we invert the raw value so higher = more line.
-    float weight = irOnLine[i] ? (float)(IR_HIGH_ON_LINE ? irRaw[i] : 1023 - irRaw[i]) : 0.0;
+    // If irHighOnLine=false, we invert the raw value so higher = more line.
+    float weight = irOnLine[i] ? (float)(irHighOnLine ? irRaw[i] : 1023 - irRaw[i]) : 0.0;
     weightedSum += weight * i;   // Multiply by sensor index (0,1,2,3)
     totalWeight += weight;
   }
   if (totalWeight < 1.0) return -1.0;  // No line detected
   return weightedSum / totalWeight;
+}
+
+// calibrateIRSensors: Auto-calibrate IR thresholds at startup.
+//
+// Two-phase blocking routine (runs once in setup()):
+//   Phase 1 (0 to IR_CAL_SETTLE_MS): Robot sits ON the line.
+//     Samples all sensors at IR_CAL_SAMPLE_INTERVAL, tracks min/max,
+//     accumulates initial averages for polarity detection.
+//     LINE LED blinks fast to indicate "hold still on line."
+//   Phase 2 (IR_CAL_SETTLE_MS to IR_CAL_DURATION_MS): User sweeps
+//     robot OFF the line. Continues tracking min/max.
+//     LINE LED solid ON to indicate "sweep off line now."
+//
+// After sampling, validates that each sensor's range >= IR_CAL_MIN_RANGE.
+// If any sensor fails, falls back to IR_DEFAULT_* for ALL sensors and
+// blinks the ERROR LED 3 times as a visual warning.
+//
+// Polarity detection: majority vote — if the initial average (on-line)
+// is above the midpoint for 3+ sensors, irHighOnLine = true.
+//
+// Threshold computation:
+//   irLineThresh[i]  = min + 50% of range (midpoint)
+//   irNoLineThresh[i] = min + 25% of range (high-on-line)
+//                     or max - 25% of range (low-on-line)
+void calibrateIRSensors() {
+  static const int irPins[] = { PIN_IR1, PIN_IR2, PIN_IR3, PIN_IR4 };
+
+  int irMin[NUM_IR_SENSORS];
+  int irMax[NUM_IR_SENSORS];
+  long irInitialSum[NUM_IR_SENSORS];
+  int initialCount = 0;
+
+  // Initialize min/max/sum
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    int val = analogRead(irPins[i]);
+    irMin[i] = val;
+    irMax[i] = val;
+    irInitialSum[i] = 0;
+  }
+
+  DEBUG_PRINTLN("=== IR CALIBRATION ===");
+  DEBUG_PRINTLN("Phase 1: Hold robot ON the line...");
+
+  unsigned long calStart = millis();
+  unsigned long lastSample = calStart;
+  unsigned long lastBlink = calStart;
+  bool phase1 = true;
+  bool ledState = false;
+
+  // Main calibration sampling loop
+  while (millis() - calStart < IR_CAL_DURATION_MS) {
+    unsigned long now = millis();
+    unsigned long elapsed = now - calStart;
+
+    // Phase transition
+    if (phase1 && elapsed >= IR_CAL_SETTLE_MS) {
+      phase1 = false;
+      digitalWrite(PIN_LED_LINE, HIGH);  // Solid ON for phase 2
+      DEBUG_PRINTLN("Phase 2: Sweep robot OFF the line...");
+    }
+
+    // Phase 1 LED: fast blink (100ms toggle)
+    if (phase1 && (now - lastBlink >= 100)) {
+      lastBlink = now;
+      ledState = !ledState;
+      digitalWrite(PIN_LED_LINE, ledState ? HIGH : LOW);
+    }
+
+    // Sample at IR_CAL_SAMPLE_INTERVAL
+    if (now - lastSample >= IR_CAL_SAMPLE_INTERVAL) {
+      lastSample = now;
+      for (int i = 0; i < NUM_IR_SENSORS; i++) {
+        int val = analogRead(irPins[i]);
+        if (val < irMin[i]) irMin[i] = val;
+        if (val > irMax[i]) irMax[i] = val;
+        if (phase1) irInitialSum[i] += val;
+      }
+      if (phase1) initialCount++;
+    }
+  }
+
+  digitalWrite(PIN_LED_LINE, LOW);
+
+  // Validate: every sensor must have sufficient range
+  bool valid = true;
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    int range = irMax[i] - irMin[i];
+    if (range < IR_CAL_MIN_RANGE) {
+      valid = false;
+      break;
+    }
+  }
+
+  if (!valid) {
+    // Fallback to hardcoded defaults
+    DEBUG_PRINTLN("CAL FAILED: insufficient range. Using defaults.");
+    irHighOnLine = IR_DEFAULT_HIGH_ON_LINE;
+    for (int i = 0; i < NUM_IR_SENSORS; i++) {
+      irLineThresh[i]  = IR_DEFAULT_LINE_THRESH;
+      irNoLineThresh[i] = IR_DEFAULT_NO_LINE_THRESH;
+    }
+    irCalibrated = false;
+
+    // Blink ERROR LED 3 times as visual warning
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(PIN_LED_ERROR, HIGH);
+      delay(150);
+      digitalWrite(PIN_LED_ERROR, LOW);
+      delay(150);
+    }
+    return;
+  }
+
+  // Detect polarity via majority vote:
+  // If initial average (on-line) > midpoint for 3+ sensors, high-on-line
+  int highVotes = 0;
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    int midpoint = (irMin[i] + irMax[i]) / 2;
+    int initialAvg = (initialCount > 0) ? (int)(irInitialSum[i] / initialCount) : midpoint;
+    if (initialAvg > midpoint) highVotes++;
+  }
+  irHighOnLine = (highVotes >= 3);
+
+  // Compute per-sensor thresholds
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    int range = irMax[i] - irMin[i];
+    irLineThresh[i] = irMin[i] + range / 2;          // 50% = midpoint
+    if (irHighOnLine) {
+      irNoLineThresh[i] = irMin[i] + range / 4;      // 25% from bottom
+    } else {
+      irNoLineThresh[i] = irMax[i] - range / 4;      // 25% from top
+    }
+  }
+  irCalibrated = true;
+
+  // Debug output (integers only — no %f on AVR)
+  DEBUG_PRINTLN("CAL OK:");
+  DEBUG_PRINTF("  Polarity: %s\n", irHighOnLine ? "HIGH_ON_LINE" : "LOW_ON_LINE");
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    DEBUG_PRINTF("  IR%d: min=%d max=%d thresh=%d noLine=%d\n",
+                 i, irMin[i], irMax[i], irLineThresh[i], irNoLineThresh[i]);
+  }
+
+  // Indicate success: LINE LED solid ON briefly
+  digitalWrite(PIN_LED_LINE, HIGH);
 }
 
 // =====================================================
@@ -1105,8 +1255,8 @@ void followWall() {
 // isWallMazeTransition: Check if we should switch from line to wall mode.
 //
 // Returns true when BOTH conditions are met:
-//   1. Low line confidence: ALL 4 IR sensors read below IR_NO_LINE_THRESH
-//      (meaning the tape has ended or the robot has left it)
+//   1. Low line confidence: ALL IR sensors read below their per-sensor
+//      irNoLineThresh[] (meaning the tape has ended or the robot has left it)
 //   2. Walls present: at least one side ultrasonic sensor detects a wall
 //      within WALL_FAR_THRESH cm
 //
@@ -1114,13 +1264,13 @@ void followWall() {
 bool isWallMazeTransition() {
   // Check if ALL sensors have low confidence (tape gone)
   bool lowLineConfidence = true;
-  for (int i = 0; i < 4; i++) {
-    if (IR_HIGH_ON_LINE) {
+  for (int i = 0; i < NUM_IR_SENSORS; i++) {
+    if (irHighOnLine) {
       // High = on line: any sensor above threshold means tape is still visible
-      if (irRaw[i] >= IR_NO_LINE_THRESH) { lowLineConfidence = false; break; }
+      if (irRaw[i] >= irNoLineThresh[i]) { lowLineConfidence = false; break; }
     } else {
       // Low = on line: any sensor below threshold means tape is still visible
-      if (irRaw[i] <= IR_NO_LINE_THRESH) { lowLineConfidence = false; break; }
+      if (irRaw[i] <= irNoLineThresh[i]) { lowLineConfidence = false; break; }
     }
   }
 
@@ -1446,15 +1596,14 @@ void setup() {
   // Ensure all motors start stopped
   driveStop();
 
-  // 3-second countdown with LED blinks for safe placement
-  for (int i = 3; i > 0; i--) {
-    DEBUG_PRINTF("Starting in %d...\n", i);
-    digitalWrite(PIN_LED_POWER, HIGH);
-    delay(500);
-    digitalWrite(PIN_LED_POWER, LOW);
-    delay(500);
-  }
+  // Auto-calibrate IR sensors (4-second window replaces the old countdown).
+  // Phase 1: hold robot on line. Phase 2: sweep off line.
+  // Falls back to hardcoded defaults if calibration fails.
+  calibrateIRSensors();
+
+  // Ensure LEDs reflect initial state after calibration
   digitalWrite(PIN_LED_POWER, HIGH);
+  digitalWrite(PIN_LED_LINE, HIGH);
 
   // Log active junction strategy
   #ifdef DEBUG

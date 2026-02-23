@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.4.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.4.0) - 2026-02-23 ([#37](https://github.com/stephennmiller/Mechatronics-Project/pull/37))
+
+### Added
+
+- `calibrateIRSensors()` function in Section 8 — 4-second auto-calibration routine at startup that samples on-line and off-line surfaces, computes per-sensor thresholds, and auto-detects polarity via majority vote
+- `irLineThresh[]`, `irNoLineThresh[]`, `irHighOnLine`, `irCalibrated` globals in Section 6 for runtime calibration state
+- `NUM_IR_SENSORS`, `IR_CAL_DURATION_MS`, `IR_CAL_SETTLE_MS`, `IR_CAL_SAMPLE_INTERVAL`, `IR_CAL_MIN_RANGE` calibration constants in Section 3
+- LED feedback during calibration: fast blink (phase 1), solid ON (phase 2), error blink on failure
+- Debug output of per-sensor min/max/threshold/noLine values after calibration
+- Calibration usage instructions in README
+
+### Changed
+
+- `readIRSensors()` now uses per-sensor `irLineThresh[i]` and runtime `irHighOnLine` instead of compile-time `IR_LINE_THRESHOLD` and `IR_HIGH_ON_LINE`
+- `linePosition()` uses runtime `irHighOnLine` instead of compile-time `IR_HIGH_ON_LINE`
+- `lineCount()` and `linePosition()` loop bounds use `NUM_IR_SENSORS` instead of hardcoded `4`
+- `isWallMazeTransition()` uses per-sensor `irNoLineThresh[i]` and runtime `irHighOnLine`
+- `setup()` replaces the 3-second countdown with `calibrateIRSensors()` call
+- Renamed `IR_HIGH_ON_LINE`, `IR_LINE_THRESHOLD`, `IR_NO_LINE_THRESH` to `IR_DEFAULT_HIGH_ON_LINE`, `IR_DEFAULT_LINE_THRESH`, `IR_DEFAULT_NO_LINE_THRESH` (hardcoded fallback values)
+
 ## [v1.3.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.3.0) - 2026-02-23 ([#36](https://github.com/stephennmiller/Mechatronics-Project/pull/36))
 
 ### Added
