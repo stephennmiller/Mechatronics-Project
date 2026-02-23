@@ -24,7 +24,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 ### Bill of Materials
 
 | Qty | Component | Purpose | Notes |
-|-----|-----------|---------|-------|
+| ----- | --------- | ------- | ----- |
 | 1 | Arduino Mega 2560 | Main controller | Provides 54 digital I/O pins, 16 analog inputs, 15 PWM outputs |
 | 4 | DC gear motors | Drive wheels | One per wheel; skid-steer (tank drive) configuration |
 | 4 | Wheels | Locomotion | Sized to match motor shafts |
@@ -43,7 +43,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 **Motor Drivers (L298N):**
 
 | L298N | Channel | Motor | PWM Pin | Direction Pins |
-|-------|---------|-------|---------|----------------|
+| ------- | --------- | ------- | --------- | ---------------- |
 | #1 | A | Left Front | 2 | 22, 23 |
 | #1 | B | Left Rear | 3 | 24, 25 |
 | #2 | A | Right Front | 4 | 26, 27 |
@@ -57,7 +57,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 **IR Sensors:**
 
 | Sensor | Position | Pin |
-|--------|----------|-----|
+| -------- | ---------- | ----- |
 | IR1 | Leftmost | A0 |
 | IR2 | Center-left | A1 |
 | IR3 | Center-right | A2 |
@@ -69,7 +69,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 **Ultrasonic Sensors (HC-SR04):**
 
 | Sensor | Direction | Trig Pin | Echo Pin |
-|--------|-----------|----------|----------|
+| -------- | ----------- | ---------- | ---------- |
 | Front | Forward | 30 | 31 |
 | Left | Left side | 32 | 33 |
 | Right | Right side | 34 | 35 |
@@ -80,7 +80,7 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 **LEDs:**
 
 | LED | Function | Pin | Color |
-|-----|----------|-----|-------|
+| ----- | ---------- | ----- | ------- |
 | Power | Robot is running | 36 | Green |
 | Error | Fault detected (e.g., low battery) | 37 | Red |
 | Line | Line-following mode active | 38 | Blue |
@@ -123,7 +123,7 @@ After calibration, per-sensor thresholds and polarity are printed to the serial 
 Tune these values in **Section 3** of `MazeRobot.ino`:
 
 | Constant | What to do |
-|---|---|
+| --- | --- |
 | `IR_DEFAULT_*` | Fallback IR thresholds used when auto-calibration fails. |
 | `VOLTAGE_SCALE` | Measure your voltage divider resistors and update the formula. |
 | `TRIM_*` | If the robot drifts, adjust per-motor offsets (+/- 30). |
