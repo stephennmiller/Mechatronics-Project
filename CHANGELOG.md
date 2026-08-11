@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.4.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.4.1) - 2026-08-11 ([#38](https://github.com/stephennmiller/Mechatronics-Project/pull/38))
+
+### Added
+
+- `.github/workflows/build.yml` — compiles the sketch for `arduino:avr:mega` with `--warnings all` on every PR and push to `main`, and posts a flash/SRAM size table to the run summary
+- `.github/workflows/claude-review.yml` — automated Claude review of every non-draft PR, prompted for embedded failure modes (SRAM pressure, `millis()` rollover, 16-bit `int` overflow, blocking calls in `loop()`) rather than a generic web-app checklist
+- CI setup instructions in README and `CLAUDE.md`
+
 ## [v1.4.0](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.4.0) - 2026-02-23 ([#37](https://github.com/stephennmiller/Mechatronics-Project/pull/37))
 
 ### Added

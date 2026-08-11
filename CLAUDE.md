@@ -12,7 +12,13 @@ Arduino Mega 2560-based maze-solving robot for UCF Mechatronics course. Solves a
 - **Board:** Arduino Mega 2560
 - **Library dependency:** NewPing (install via Arduino Library Manager)
 - **Serial monitor:** 115200 baud for debug output
-- **No automated tests or CI** — verification is done via serial debug output and physical testing
+- **No unit tests** — behavior is verified via serial debug output and physical testing
+- **CI:** `.github/workflows/build.yml` compiles the sketch for `arduino:avr:mega` on every PR and reports flash/SRAM usage. Reproduce locally with:
+  ```
+  arduino-cli compile --fqbn arduino:avr:mega --warnings all MazeRobot
+  ```
+  A green build means it compiles, nothing more — it does not exercise any robot behavior.
+- **PR review:** `.github/workflows/claude-review.yml` runs Claude on every non-draft PR. Requires both the [Claude GitHub App](https://github.com/apps/claude) installed on the repo and a `CLAUDE_CODE_OAUTH_TOKEN` secret; without the secret the job emits a warning and skips.
 
 ## Code Architecture
 
