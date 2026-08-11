@@ -1,0 +1,131 @@
+name: Claude Review
+
+# Reviews every non-draft PR against main. The review prompt is written for
+# this repo specifically -- a single AVR sketch with no test harness -- so it
+# looks for embedded failure modes (SRAM, millis() rollover, 16-bit int math,
+# blocking calls) rather than the generic web-app checklist.
+#
+# Two setup steps are required before this runs:
+#   1. Install the Claude GitHub App: https://github.com/apps/claude
+#   2. Add the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`)
+#
+# Note there is deliberately no `github_token:` input. The action authenticates
+# to GitHub through the Claude App using the OIDC token, which is why this job
+# needs `id-token: write`. Passing github_token is only correct when running a
+# custom GitHub App of your own, and doing so makes comments post under the
+# wrong identity.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review PR
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+      actions: read # lets Claude read the Build workflow's result
+    steps:
+      # `secrets` is not available in a job-level `if`, so gate on a step
+      # instead. Until the secret exists this surfaces a warning annotation
+      # rather than a red X on every PR.
+      - name: Check for Claude credentials
+        id: preflight
+        env:
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$CLAUDE_TOKEN" ]; then
+            echo "::warning title=Claude review skipped::Secret CLAUDE_CODE_OAUTH_TOKEN is not set. Run 'claude setup-token' locally, add the result under Settings > Secrets and variables > Actions, and install the Claude GitHub App at https://github.com/apps/claude."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Review
+        if: steps.preflight.outputs.configured == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The project is a maze-solving robot: one
+            monolithic Arduino sketch (MazeRobot/MazeRobot.ino) targeting an
+            Arduino Mega 2560 (ATmega2560, 8 KB SRAM, 256 KB flash, 16-bit int).
+            Read CLAUDE.md and docs/ARCHITECTURE.md before reviewing.
+
+            Focus on the failure modes that actually bite this codebase:
+
+            1. Real-time behavior. loop() must stay under ~50 ms and must never
+               block during navigation. Flag any delay(), busy-wait, or long
+               while-loop added to a path reachable from loop().
+
+            2. millis() rollover. Timer arithmetic must be unsigned subtraction
+               (`now - start >= interval`). Flag any `start + interval <= now`
+               form, or a timestamp stored in a signed or too-narrow type.
+
+            3. SRAM. Globals already use ~14% of 8 KB. Flag new large globals or
+               arrays, string literals not wrapped in F(), snprintf stack
+               buffers over 120 bytes, and any dynamic allocation (malloc, new,
+               or the String class) -- the project forbids all three.
+
+            4. AVR libc limits. snprintf on AVR does not support %f. Float
+               output must go through dtostrf() or an integer cast.
+
+            5. 16-bit int. On AVR `int` is 16 bits. Flag arithmetic that can
+               exceed +/-32767 -- multiplied analogRead values, PID terms,
+               accumulated error, millis() results assigned to int.
+
+            6. Convention: every tunable constant belongs in Section 3 of the
+               sketch. Flag magic numbers introduced anywhere else.
+
+            7. Motor encoding: positive speed = forward, negative = backward,
+               zero = coast. Trim offsets must be clamped in a way that
+               preserves sign, and the result must stay in valid PWM range.
+
+            8. PID: check both anti-windup layers (integral clamping AND
+               conditional integration), and that the line and wall controllers
+               stay isolated and get reset across mode transitions.
+
+            9. State machine: every transition must set up whatever the target
+               state assumes. Check that ERROR_STATE and EXIT_FOUND stay
+               terminal and that no state becomes unreachable.
+
+            10. Sensor scheduling: the front ultrasonic reads every cycle, but
+                left and right alternate. Flag code that assumes both side
+                distances were refreshed in the same cycle. Check EMA filter
+                initialization and IR array bounds (4 sensors, A0-A3).
+
+            The Build workflow compiles the sketch on this PR. Check its result
+            with `gh run list` if it has finished; if it is still running, say
+            so rather than guessing.
+
+            Scope notes:
+            - This is firmware. Do NOT raise web-application concerns (SQL
+              injection, XSS, authentication, API design).
+            - There is no test harness and no unit tests are expected. Do not
+              ask for them. Verification is compile + physical testing.
+            - Comment only on real problems. Use inline comments for specific
+              lines and one top-level comment for the summary. If the change
+              looks correct, say that plainly instead of manufacturing
+              findings.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh run list:*),Bash(gh run view:*)"

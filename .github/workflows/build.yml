@@ -1,0 +1,91 @@
+name: Build
+
+# Compiles the sketch for the Arduino Mega 2560 on every PR and every push to
+# main. This is the only mechanical check the project has -- there are no unit
+# tests, since the code is a single sketch that talks directly to hardware.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile (Arduino Mega 2560)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AVR_CORE_VERSION: 1.8.7
+      NEWPING_VERSION: 1.9.7
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      # The AVR core is a ~200 MB download. Cache it against the pinned
+      # versions so a normal run only pays for the compile itself.
+      - name: Cache Arduino cores and libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-avr-${{ env.AVR_CORE_VERSION }}-newping-${{ env.NEWPING_VERSION }}
+
+      - name: Install AVR core and NewPing
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install "arduino:avr@${AVR_CORE_VERSION}"
+          arduino-cli lib install "NewPing@${NEWPING_VERSION}"
+
+      # Human-readable pass: compiler errors and warnings land in the run log.
+      # The sketch itself is clean under --warnings all; the only warnings you
+      # should see come from the Arduino core's own new.cpp.
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn arduino:avr:mega \
+            --warnings all \
+            MazeRobot
+
+      # Second pass for the size numbers only. arduino-cli reuses its build
+      # cache, so this re-run is effectively free.
+      - name: Collect size data
+        run: |
+          arduino-cli compile \
+            --fqbn arduino:avr:mega \
+            --json \
+            MazeRobot > compile.json
+
+      # The Mega has 8 KB of SRAM and the sketch keeps every buffer static, so
+      # a jump in the `data` segment is the failure mode worth watching. Put
+      # both segments on the run summary instead of burying them in the log.
+      - name: Report flash and SRAM usage
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+
+          sections = json.loads(pathlib.Path("compile.json").read_text())[
+              "builder_result"
+          ]["executable_sections_size"]
+          labels = {"text": "Flash (program storage)", "data": "SRAM (global variables)"}
+
+          print("### Size report -- Arduino Mega 2560\n")
+          print("| Segment | Used | Max | Percent |")
+          print("| --- | ---: | ---: | ---: |")
+          for s in sections:
+              pct = 100.0 * s["size"] / s["max_size"]
+              print(
+                  f"| {labels.get(s['name'], s['name'])} "
+                  f"| {s['size']:,} B | {s['max_size']:,} B | {pct:.1f}% |"
+              )
+          PY

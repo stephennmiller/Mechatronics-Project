@@ -107,6 +107,34 @@ This project implements a maze-solving robot using an Arduino Mega 2560. The rob
 2. Install the NewPing library in the Arduino IDE.
 3. Upload `MazeRobot.ino` to your Arduino Mega.
 
+## Continuous Integration
+
+Two GitHub Actions workflows run on every pull request:
+
+| Workflow | What it does |
+| --- | --- |
+| `Build` | Compiles the sketch for `arduino:avr:mega` with `--warnings all` and posts flash/SRAM usage to the run summary. |
+| `Claude Review` | Reviews the diff for embedded-specific problems — SRAM pressure, `millis()` rollover, 16-bit `int` overflow, blocking calls in `loop()`. |
+
+A green `Build` means the sketch compiles; it does not verify any robot behavior. That still requires the hardware.
+
+To run the same compile locally:
+
+```
+arduino-cli core install arduino:avr@1.8.7
+arduino-cli lib install NewPing@1.9.7
+arduino-cli compile --fqbn arduino:avr:mega --warnings all MazeRobot
+```
+
+### Enabling `Claude Review`
+
+Two one-time setup steps, both required:
+
+1. Install the [Claude GitHub App](https://github.com/apps/claude) on this repository. The action authenticates to GitHub through the app, so the workflow fails without it.
+2. Generate a token with `claude setup-token` and save it as a repository secret named `CLAUDE_CODE_OAUTH_TOKEN` (Settings > Secrets and variables > Actions).
+
+Until the secret exists the job logs a warning and skips rather than failing the PR. `Build` needs no setup and runs immediately.
+
 ## Calibration
 
 ### IR Auto-Calibration (at startup)
