@@ -253,10 +253,15 @@ enum USIndex : uint8_t { US_FRONT = 0, US_LEFT = 1, US_RIGHT = 2, NUM_US_SENSORS
                                       // increments retry counter; outside
                                       // this window resets counter to 1
 #define STUCK_PID_THRESHOLD  10.0     // PID output within this of ±255 = saturated
-#define TURN_TIMEOUT_MS      2000     // Turn exceeding this duration = stuck
 
 // -- Junction Strategy --
 // See Section 6 (junctionStrategy) for maze-solving algorithm selection.
+// After a junction turn, junction detection is suppressed for this long
+// (measured from when the turn starts, so it includes the turn itself).
+// Gives the robot time to drive out of the junction so it doesn't
+// re-detect the same intersection and turn again. Tune with BASE_SPEED:
+// the robot should travel roughly one corridor width after the turn.
+#define JUNCTION_COOLDOWN_MS 1500
 
 // =====================================================
 // SECTION 4: TYPE DEFINITIONS
@@ -630,6 +635,7 @@ unsigned long pendingTurnDuration = TURN_90_DURATION;  // Duration for the next 
 // See JunctionStrategy enum in Section 5 for options.
 JunctionStrategy junctionStrategy = STRATEGY_LEFT_WALL;
 uint8_t junctionCount = 0;  // Junction counter for STRATEGY_ALTERNATING
+Timer junctionCooldown = { 0, 0, false };  // Suppresses re-detection after a junction turn
 
 // --- IR Calibration State ---
 // Populated by calibrateIRSensors() at startup. If auto-calibration fails,
@@ -1020,8 +1026,8 @@ void calibrateIRSensors() {
 // The line position (0.0 to 3.0) from linePosition() is compared
 // to the center setpoint (1.5). The PID output is used to create
 // a speed differential between left and right motors:
-//   - Positive error (line is to the right) -> reduce left speed,
-//     increase right speed -> robot steers right toward the line
+//   - Positive error (line is to the right) -> increase left speed,
+//     reduce right speed -> robot steers right toward the line
 //   - Negative error (line is to the left) -> opposite
 //
 // LINE LOSS HANDLING:
@@ -1107,25 +1113,37 @@ void followLine() {
 // PID SIGN CONVENTION (right wall following):
 //   error = measured_distance - WALL_SETPOINT
 //   Positive error -> robot is too far from right wall -> steer right
-//   -> decrease left speed, increase right speed
+//   -> increase left speed, decrease right speed
 // =====================================================
 
 void followWall() {
 
   // --- Step 1: Junction detection ---
-  // A junction is detected by checking which directions are "open"
-  // (no wall within WALL_FAR_THRESH cm).
-  bool openFront = (distFiltered[US_FRONT] > WALL_FAR_THRESH);
-  bool wallLeft  = (distFiltered[US_LEFT]  < WALL_CLOSE_THRESH);
-  bool wallRight = (distFiltered[US_RIGHT] < WALL_CLOSE_THRESH);
+  // A direction is "open" when no wall is within WALL_FAR_THRESH cm.
+  // Both side branches must be open for a junction; a single side
+  // opening is a corner/branch and is handled by the wall PID below.
+  //
+  //   T-junction (arriving up the stem):  wall ahead, both sides open
+  //   Four-way intersection:              open ahead and on both sides
+  //
+  // (Walls on both sides with open space ahead is a plain corridor,
+  // not a junction.)
+  //
+  // Detection is suppressed during junctionCooldown so the robot can
+  // drive out of the intersection after turning instead of
+  // re-detecting it and turning again.
+  bool inJunctionCooldown = !timerExpired(&junctionCooldown);
+  bool openFront    = (distFiltered[US_FRONT] > WALL_FAR_THRESH);
+  bool blockedFront = (distFiltered[US_FRONT] < WALL_CLOSE_THRESH);
+  bool openLeft     = (distFiltered[US_LEFT]  > WALL_FAR_THRESH);
+  bool openRight    = (distFiltered[US_RIGHT] > WALL_FAR_THRESH);
 
-  // T-junction: open ahead, but walls on both sides form the T
-  bool tJunction = (openFront && wallLeft && wallRight);
-  // Four-way intersection: open in all directions
-  bool fourWay   = (openFront && !wallLeft && !wallRight);
+  bool tJunction = (blockedFront && openLeft && openRight);
+  bool fourWay   = (openFront && openLeft && openRight);
 
-  if (tJunction || fourWay) {
+  if (!inJunctionCooldown && (tJunction || fourWay)) {
     TurnDir junctionDir = getJunctionTurn();
+    timerStart(&junctionCooldown, JUNCTION_COOLDOWN_MS);
     startTurn(junctionDir, STATE_WALL_FOLLOWING);
     return;
   }
@@ -1200,6 +1218,19 @@ void followWall() {
   // --- Step 5: PID wall distance control ---
   // Measure distance to the wall we're following
   float wallDist = followRightWall ? distFiltered[US_RIGHT] : distFiltered[US_LEFT];
+
+  // Clearing a junction: right after a junction turn the followed wall is
+  // often still missing (e.g. turning left at a four-way while tracking the
+  // right wall). The PID would saturate and pivot the robot straight back
+  // into the opening it just turned away from, so drive straight until a
+  // wall reappears or the cooldown ends.
+  if (inJunctionCooldown && wallDist > WALL_FAR_THRESH) {
+    pidReset(&pidWall);
+    lastPidOutput = 0;
+    driveTank(speed, speed);
+    return;
+  }
+
   float error = wallDist - WALL_SETPOINT;
   float output = pidCompute(&pidWall, error);
   lastPidOutput = output;
@@ -1419,15 +1450,18 @@ bool checkBattery() {
 // if stuck recovery has escalated to error state. Returns true
 // otherwise (including during active recovery maneuvers).
 //
-// Three independent stuck signals:
+// Two independent stuck signals, both active only during
+// LINE_FOLLOWING and WALL_FOLLOWING:
 //   1. Ultrasonic stagnation — no distFiltered[] sensor changes by
-//      > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS during
-//      LINE_FOLLOWING or WALL_FOLLOWING.
+//      > STUCK_DIST_THRESHOLD for STUCK_TIMEOUT_MS. Sensors beyond
+//      WALL_FAR_THRESH are ignored; if all are, the window restarts.
 //   2. PID-output saturation — lastPidOutput stays within
 //      STUCK_PID_THRESHOLD of its ±255 limit for STUCK_TIMEOUT_MS.
 //      Reset when ultrasonic movement is detected.
-//   3. Turn timeout — STATE_TURNING exceeds TURN_TIMEOUT_MS,
-//      indicating the robot cannot physically complete the rotation.
+//
+// Turns are not monitored: they are open-loop (timed), so they always
+// "complete" when their timer expires and there is no sensor that could
+// tell a blocked turn from a successful one.
 //
 // Any signal triggers recovery via startBackupAndTurn() with
 // alternating direction. After STUCK_MAX_RETRIES within
@@ -1442,82 +1476,76 @@ bool checkStuck() {
 
   unsigned long now = millis();
   bool stuckDetected = false;
-  RobotState resumeState = currentState;
-
-  // --- Signal 3: Turn timeout ---
-  // Active during STATE_TURNING. If the turn has been running longer
-  // than TURN_TIMEOUT_MS, the robot is physically unable to rotate.
-  if (currentState == STATE_TURNING) {
-    if (stateTimer.running &&
-        (now - stateTimer.startTime > TURN_TIMEOUT_MS)) {
-      stuckDetected = true;
-      resumeState = returnState;  // Resume the state the turn was returning to
-    } else {
-      wasChecking = false;
-      return true;
-    }
-  }
 
   // --- Signals 1 & 2: Ultrasonic stagnation + PID saturation ---
   // Active during LINE_FOLLOWING and WALL_FOLLOWING only.
-  if (!stuckDetected) {
-    bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
-                        currentState == STATE_WALL_FOLLOWING);
+  bool shouldCheck = (currentState == STATE_LINE_FOLLOWING ||
+                      currentState == STATE_WALL_FOLLOWING);
 
-    if (!shouldCheck) {
-      wasChecking = false;
-      return true;
-    }
-
-    // Just entered a monitored state from a non-monitored state —
-    // capture fresh snapshot so prior maneuver time doesn't accumulate.
-    if (!wasChecking) {
-      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
-      snapTime = now;
-      pidSatTime = 0;
-      wasChecking = true;
-      return true;
-    }
-
-    // Check if any ultrasonic sensor has changed meaningfully.
-    // Skip sensors where both snapshot and current reading are beyond
-    // WALL_FAR_THRESH — HC-SR04 noise at long range (3-4 cm) exceeds
-    // the threshold and would cause false snapshot refreshes.
-    bool hasMoved = false;
-    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) {
-      if (distFiltered[i] > WALL_FAR_THRESH && snapDist[i] > WALL_FAR_THRESH)
-        continue;
-      float diff = distFiltered[i] - snapDist[i];
-      if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
-        hasMoved = true;
-        break;
-      }
-    }
-
-    if (hasMoved) {
-      for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
-      snapTime = now;
-      pidSatTime = 0;  // Movement detected — reset PID saturation timer
-      return true;
-    }
-
-    // Signal 2: PID-output saturation
-    float pidOut = lastPidOutput;
-    if (pidOut > (255.0 - STUCK_PID_THRESHOLD) ||
-        pidOut < (-255.0 + STUCK_PID_THRESHOLD)) {
-      if (pidSatTime == 0) pidSatTime = now;
-      if (now - pidSatTime >= STUCK_TIMEOUT_MS) stuckDetected = true;
-    } else {
-      pidSatTime = 0;
-    }
-
-    // Signal 1: Ultrasonic stagnation
-    if (!stuckDetected && (now - snapTime >= STUCK_TIMEOUT_MS)) {
-      stuckDetected = true;
-    }
-
-    if (!stuckDetected) return true;
+  if (!shouldCheck) {
+    wasChecking = false;
+    return true;
   }
+
+  // Just entered a monitored state from a non-monitored state —
+  // capture fresh snapshot so prior maneuver time doesn't accumulate.
+  if (!wasChecking) {
+    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
+    snapTime = now;
+    pidSatTime = 0;
+    wasChecking = true;
+    return true;
+  }
+
+  // Check if any ultrasonic sensor has changed meaningfully.
+  // Skip sensors where both snapshot and current reading are beyond
+  // WALL_FAR_THRESH — HC-SR04 noise at long range (3-4 cm) exceeds
+  // the threshold and would cause false snapshot refreshes.
+  bool hasMoved = false;
+  bool anyInRange = false;
+  for (uint8_t i = 0; i < NUM_US_SENSORS; i++) {
+    if (distFiltered[i] > WALL_FAR_THRESH && snapDist[i] > WALL_FAR_THRESH)
+      continue;
+    anyInRange = true;
+    float diff = distFiltered[i] - snapDist[i];
+    if (diff > STUCK_DIST_THRESHOLD || diff < -STUCK_DIST_THRESHOLD) {
+      hasMoved = true;
+      break;
+    }
+  }
+
+  if (hasMoved) {
+    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
+    snapTime = now;
+    pidSatTime = 0;  // Movement detected — reset PID saturation timer
+    return true;
+  }
+
+  // No sensor within WALL_FAR_THRESH (e.g. open floor in the line maze):
+  // the ultrasonics carry no motion information, so absence of change is
+  // not evidence of being stuck. Restart the stagnation window instead of
+  // letting it run out. PID saturation (signal 2) is still checked below.
+  if (!anyInRange) {
+    for (uint8_t i = 0; i < NUM_US_SENSORS; i++) snapDist[i] = distFiltered[i];
+    snapTime = now;
+  }
+
+  // Signal 2: PID-output saturation
+  float pidOut = lastPidOutput;
+  if (pidOut > (255.0 - STUCK_PID_THRESHOLD) ||
+      pidOut < (-255.0 + STUCK_PID_THRESHOLD)) {
+    if (pidSatTime == 0) pidSatTime = now;
+    if (now - pidSatTime >= STUCK_TIMEOUT_MS) stuckDetected = true;
+  } else {
+    pidSatTime = 0;
+  }
+
+  // Signal 1: Ultrasonic stagnation
+  if (!stuckDetected && (now - snapTime >= STUCK_TIMEOUT_MS)) {
+    stuckDetected = true;
+  }
+
+  if (!stuckDetected) return true;
 
   // === STUCK DETECTED ===
   if (lastRecoveryTime > 0 && (now - lastRecoveryTime < STUCK_COOLDOWN_MS)) {
@@ -1538,7 +1566,7 @@ bool checkStuck() {
 
   // Recovery: backup-and-turn in alternating direction
   TurnDir escapeDir = (stuckRetryCount % 2 == 1) ? TURN_LEFT : TURN_RIGHT;
-  startBackupAndTurn(escapeDir, resumeState);
+  startBackupAndTurn(escapeDir, currentState);
 
   lastRecoveryTime = now;
   wasChecking = false;

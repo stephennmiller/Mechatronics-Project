@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Wall-maze junction detection: a plain corridor (open ahead, walls on both sides) was classified as a T-junction, so the robot turned into a side wall in every narrow corridor with more than 50 cm clear ahead. T-junctions are now "wall ahead, both sides open"; four-ways are "open ahead and on both sides"
+- Repeated junction turns: added `JUNCTION_COOLDOWN_MS` (Section 3), which suppresses junction detection after a junction turn so the robot drives out of the intersection instead of re-detecting it and spinning in place. During the cooldown, if the followed wall is still missing, the robot drives straight instead of letting the saturated wall PID pivot it back into the opening
+- Stuck watchdog false positives: when every ultrasonic sensor read beyond `WALL_FAR_THRESH`, no movement could ever be registered, so on an open line maze the robot declared itself stuck every ~3 s and reached `ERROR_STATE` after ~10 s. The stagnation window now restarts when no sensor is in range
+- Section 9 and Section 10 header comments described the steering differential backwards (the code was correct)
+
+### Removed
+
+- Turn-timeout stuck signal and `TURN_TIMEOUT_MS`. Turns are timed (300/600 ms) and always end before the 2000 ms timeout, so the check could never fire
+
 ## [v1.4.1](https://github.com/stephennmiller/Mechatronics-Project/releases/tag/v1.4.1) - 2026-08-11 ([#38](https://github.com/stephennmiller/Mechatronics-Project/pull/38))
 
 ### Added

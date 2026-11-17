@@ -42,11 +42,12 @@ Each iteration of `loop()` follows these steps:
 
 ## Stuck Detection & Recovery
 
-The stuck-detection watchdog monitors the robot using three independent signals:
+The stuck-detection watchdog monitors the robot using two independent signals:
 
-1. **Ultrasonic stagnation** -- during `LINE_FOLLOWING` and `WALL_FOLLOWING`, a snapshot of the `distFiltered[]` array is captured at watchdog start and whenever the robot re-enters a monitored state from a non-monitored state (e.g. returning to `WALL_FOLLOWING` after a turn). Each loop iteration, the watchdog compares current filtered distances against the snapshot. If no sensor value has changed by more than 2.0 cm for a continuous 3000 ms window, the robot is declared stuck.
+1. **Ultrasonic stagnation** -- during `LINE_FOLLOWING` and `WALL_FOLLOWING`, a snapshot of the `distFiltered[]` array is captured at watchdog start and whenever the robot re-enters a monitored state from a non-monitored state (e.g. returning to `WALL_FOLLOWING` after a turn). Each loop iteration, the watchdog compares current filtered distances against the snapshot. If no sensor value has changed by more than 2.0 cm for a continuous 3000 ms window, the robot is declared stuck. Sensors reading beyond `WALL_FAR_THRESH` (50 cm) in both the snapshot and the current reading are ignored, since HC-SR04 noise at long range exceeds the 2 cm threshold. If every sensor is out of range (e.g. open floor in the line maze), the window restarts rather than expiring: with nothing in range the ultrasonics carry no motion information.
 2. **PID-output saturation** -- during `LINE_FOLLOWING` and `WALL_FOLLOWING`, the watchdog tracks how long the PID control output stays within `STUCK_PID_THRESHOLD` of its +/- limit. Sustained saturation for 3000 ms indicates the robot is pushing against an obstacle it cannot overcome. The saturation timer resets whenever ultrasonic movement is detected.
-3. **Turn timeout** -- during `STATE_TURNING`, if a turn exceeds `TURN_TIMEOUT_MS` the robot is assumed physically unable to complete the rotation.
+
+Turns are not monitored. They are open-loop (timed), so they always complete when their timer expires; without encoders or an IMU there is no signal that distinguishes a blocked turn from a successful one.
 
 Recovery is handled by `startBackupAndTurn()`. The turn direction alternates with each retry: odd-numbered retries turn left, even-numbered retries turn right. This prevents the robot from repeating the same failed escape path. A retry counter tracks the number of recovery attempts within a 5000 ms cooldown window.
 
